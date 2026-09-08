@@ -1,0 +1,6 @@
+# Ignore images and raw data
+data/
+
+# Ignore Python cache and environment
+__pycache__/
+venv/
