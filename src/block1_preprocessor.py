@@ -12,6 +12,8 @@ class GlobalPreprocessor:
     """
     BLOCK 1: Global Preprocessing Node.
     Applies the mathematical morphology and thresholding pipeline to the raw image.
+    Uses dual-thresholding: preserves full dynamic range for manual SAM labeling
+    while generating an ultra-sensitive obstacle mask for the Smart Slicer.
     """
 
     @staticmethod
@@ -45,24 +47,39 @@ class GlobalPreprocessor:
         return cv2.normalize(processed, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
     def apply_gamma(self, img: np.ndarray, gamma: float = config.GAMMA_VALUE) -> np.ndarray:
-        """Step 3: Power-law transform to suppress dark artifacts and boost bright fibers."""
+        """Step 3: Power-law transform to clean residual noise without clipping thin tubes."""
         img_f = self.to_float(img)
         adjusted = exposure.adjust_gamma(img_f, gamma)
         return self.to_uint8(adjusted)
 
     def process(self, img: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Runs the strict sequential filter pipeline. Returns both the filtered image and binary mask."""
+        """
+        Runs the strict sequential filter pipeline.
+        Returns:
+        - gamma_img: Contrast-enhanced grayscale image for SAM labeling & feature extraction.
+        - binary_mask: High-sensitivity obstacle mask ensuring faint loops & bridges never get cut.
+        """
         print("      -> Step 1: Denoise (Bilateral)...")
         denoised = self.apply_bilateral(img)
 
         print("      -> Step 2: Background Extraction (White Top-Hat)...")
         tophat = self.apply_tophat(denoised)
 
-        print("      -> Step 3: Contrast Enhancement (Gamma)...")
+        print(f"      -> Step 3: Contrast Enhancement (Gamma={config.GAMMA_VALUE})...")
         gamma_img = self.apply_gamma(tophat)
 
-        print("      -> Step 4: Global Binarization...")
-        _, binary_mask = cv2.threshold(gamma_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        print("      -> Step 4: Sensitive Obstacle Mask Generation...")
+        # Calculate Otsu baseline
+        otsu_val, _ = cv2.threshold(gamma_img, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-        # Возвращаем КОРТЕЖ (Отфильтрованная картинка, Бинарная маска)
-        return gamma_img, binary_mask
+        # Relax threshold to capture faint bridges and dim loops
+        safety_threshold = max(12, int(otsu_val * config.OTSU_SAFETY_FACTOR))
+        _, sensitive_mask = cv2.threshold(gamma_img, safety_threshold, 255, cv2.THRESH_BINARY)
+
+        # Morphological Closing: bridges microscopic gaps across faint cylindrical walls
+        close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        obstacle_mask = cv2.morphologyEx(sensitive_mask, cv2.MORPH_CLOSE, close_kernel)
+
+        print(f"         [Otsu Baseline: {otsu_val:.1f} | Safety Threshold: {safety_threshold}]")
+
+        return gamma_img, obstacle_mask

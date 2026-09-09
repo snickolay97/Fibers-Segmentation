@@ -43,7 +43,7 @@ def main():
     """
 
     # Select your desired mode here:
-    selected_mode = 'end_to_end'
+    selected_mode = 'extract_features'
 
     print(f"Starting pipeline in mode: '{selected_mode}'\n" + "="*50)
     manager.run(mode=selected_mode)
