@@ -29,14 +29,10 @@ def main():
     selected_mode = 'filter_and_slice'
 
     # Target dataset for tile exclusion mode
-    DATASET_NAME = 'FL01_G3_RGB_Red'
+    DATASET_NAME = 'FL1_G3_RGB_Red'
 
     # Ranges & IDs of tiles to isolate (outside microchannel or artifacts)
-    TILES_TO_EXCLUDE = [
-        "1-9",
-        "14-20, 82, 83, 95-97, 110, 111",
-        "153-159, 167-175, 180-205"
-    ]
+    TILES_TO_EXCLUDE = []  # Review the v2 overview: old tile IDs are no longer valid.
 
     print(f"Starting pipeline in mode: '{selected_mode}'\n" + "=" * 50)
 

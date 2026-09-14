@@ -55,30 +55,44 @@ class BiomedicalPipelineManager:
         else:
             print(f"[!] Unknown mode '{mode}'. Available: 'filter_and_slice', 'manage_tiles', 'extract_features', 'end_to_end'.")
 
+    @staticmethod
+    def _has_output_files(folder):
+        return os.path.isdir(folder) and any(files for _, _, files in os.walk(folder))
+
     def _execute_filter_and_slice(self):
         if not os.path.exists(self.input_dir):
             os.makedirs(self.input_dir, exist_ok=True)
             print(f"Created input directory '{self.input_dir}'. Please place .tif images there.")
             return
 
-        image_files = glob.glob(os.path.join(self.input_dir, '*.tif*'))
+        image_files = sorted(glob.glob(os.path.join(self.input_dir, '*.tif*')))
         if not image_files:
             print(f"No .tif images found in '{self.input_dir}'.")
             return
 
         print(f"Found {len(image_files)} large TIFF images. Initializing pipeline...")
 
+        processed = skipped = failed = 0
         for img_path in image_files:
             base_name = os.path.splitext(os.path.basename(img_path))[0]
             print(f"\n---> [Processing Image] {base_name}")
 
             image_out_dir = os.path.join(self.output_dir, base_name)
-            os.makedirs(image_out_dir, exist_ok=True)
 
             raw_image_out_dir = None
             if config.SAVE_RAW_TILES:
                 raw_image_out_dir = os.path.join(self.raw_output_dir, base_name)
-                os.makedirs(raw_image_out_dir, exist_ok=True)
+
+            # Check before loading/filtering: existing results must not prevent
+            # processing a different input image later in this batch. Include
+            # excluded tiles and partial outputs; never silently overwrite them.
+            folders = [image_out_dir] + ([raw_image_out_dir] if raw_image_out_dir else [])
+            existing = [folder for folder in folders if self._has_output_files(folder)]
+            if existing:
+                skipped += 1
+                print('[SKIP] Existing output files retained: ' + ', '.join(existing))
+                print('       To regenerate this image, use fresh output folders or remove its generated outputs.')
+                continue
 
             try:
                 img = tifffile.imread(img_path)
@@ -92,22 +106,30 @@ class BiomedicalPipelineManager:
                     img = np.clip(img, 0, 255).astype(np.uint8)
 
             except Exception as e:
+                failed += 1
                 print(f"[!] Error loading {img_path}: {e}")
                 continue
 
             print(f"   - Loaded resolution: {img.shape[1]}x{img.shape[0]} px | Type: {img.dtype}")
 
-            filtered_img, obstacle_mask = self.preprocessor.process(img)
-            self.slicer.slice(
-                filtered_img=filtered_img,
-                raw_img=img,
-                mask=obstacle_mask,
-                base_name=base_name,
-                output_dir=image_out_dir,
-                raw_output_dir=raw_image_out_dir
-            )
+            try:
+                filtered_img, obstacle_mask = self.preprocessor.process(img)
+                self.slicer.slice(
+                    filtered_img=filtered_img,
+                    raw_img=img,
+                    mask=obstacle_mask,
+                    base_name=base_name,
+                    output_dir=image_out_dir,
+                    raw_output_dir=raw_image_out_dir
+                )
+                processed += 1
+            except Exception as e:
+                failed += 1
+                print(f'[ERROR] {base_name}: {e}')
+                print('        Partial outputs are retained; continuing with the next input.')
 
-        print("\n[SUCCESS] Slicing and Overview Mapping Finished!")
+        print(f'\n[SUMMARY] Processed: {processed}; existing outputs skipped: {skipped}; failed: {failed}')
+        return dict(processed=processed, skipped=skipped, failed=failed)
 
     def _execute_extract_features(self):
         if not os.path.exists(self.output_dir):

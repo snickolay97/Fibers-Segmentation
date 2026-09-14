@@ -1,4 +1,5 @@
 import os
+import json
 import glob
 import re
 import cv2
@@ -45,8 +46,10 @@ class TopologicalFeatureExtractor:
         with open(label_path, 'r') as f:
             for line in f:
                 parts = line.strip().split()
-                if len(parts) < 3:
+                if not parts:
                     continue
+                if len(parts) < 7 or (len(parts)-1) % 2:
+                    raise ValueError('Expected YOLO segmentation polygon (at least 3 points): '+label_path)
                 class_id = int(parts[0])
                 coords = np.array(parts[1:], dtype=float).reshape(-1, 2)
                 coords[:, 0] *= img_w
@@ -154,18 +157,33 @@ class TopologicalFeatureExtractor:
             return
 
         all_features = []
+        records = {}
+        manifest_path = os.path.join(self.image_dir,'overview',self.large_image_name+'_tiles_coords.json')
+        if os.path.isfile(manifest_path):
+            with open(manifest_path,encoding='utf-8') as handle:
+                manifest = json.load(handle)
+            if isinstance(manifest,dict) and manifest.get('schema_version') == 3:
+                records = {r['filename']:r for r in manifest['tiles']}
 
         for img_path in image_files:
             base_name = os.path.splitext(os.path.basename(img_path))[0]
             label_path = os.path.join(self.labels_dir, f"{base_name}.txt")
 
-            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+            record = records.get(os.path.basename(img_path))
+            measurement_path = os.path.join(self.image_dir,record['native_filename']) if record else img_path
+            img = cv2.imread(measurement_path, cv2.IMREAD_GRAYSCALE)
             if img is None:
+                if record:
+                    raise ValueError('Missing native measurement image: '+measurement_path)
                 continue
 
             img_h, img_w = img.shape
             if os.path.exists(label_path):
-                objects = self._parse_yolo(label_path, img_w, img_h)
+                # YOLO coordinates are normalized to the square model canvas.
+                # Multiplying by the padded native side inverts the resize
+                # without rounding the polygon on the smaller image first.
+                side = record['transform']['padded_native_shape'][0] if record else None
+                objects = self._parse_yolo(label_path, side or img_w, side or img_h)
             else:
                 _, envelope_mask = cv2.threshold(img, config.MIN_CLEAN_THRESHOLD, 255, cv2.THRESH_BINARY)
                 close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -179,6 +197,9 @@ class TopologicalFeatureExtractor:
             saved_obj_idx = 0
 
             for class_id, contour in objects:
+                x,y,w,h = cv2.boundingRect(contour)
+                if x >= img_w or y >= img_h or x+w <= 0 or y+h <= 0:
+                    continue  # Annotation lies completely in letterbox padding.
                 class_name = self.class_map.get(class_id, 'Unknown')
                 clean_binary, clean_gray = self._create_local_mask(contour, img)
                 decomposed_units = self._decompose_sub_objects(clean_binary, clean_gray)
@@ -206,6 +227,8 @@ class TopologicalFeatureExtractor:
                         'Object_ID': saved_obj_idx,
                         'Class_ID': class_id,
                         'Class_Name': class_name,
+                        'Measurement_Space': 'source_pixels' if record else 'tile_pixels',
+                        'Source_Pixels_Per_Output_Pixel': record['transform']['source_pixels_per_output_pixel'] if record else 1.0,
                         **geo_features,
                         **topo_features
                     })

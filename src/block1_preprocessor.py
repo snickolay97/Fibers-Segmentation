@@ -81,11 +81,11 @@ class GlobalPreprocessor:
         _, raw_binary = cv2.threshold(gamma_img, safety_threshold, 255, cv2.THRESH_BINARY)
 
         # Bridge gaps between neighboring beads (17x17 ellipse)
-        bridge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (17, 17))
+        bridge_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config.BRIDGE_KERNEL_SIZE, config.BRIDGE_KERNEL_SIZE))
         closed_mask = cv2.morphologyEx(raw_binary, cv2.MORPH_CLOSE, bridge_kernel)
 
         # Safety buffer around fibers (5x5 ellipse)
-        buffer_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+        buffer_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (config.BUFFER_KERNEL_SIZE, config.BUFFER_KERNEL_SIZE))
         obstacle_mask = cv2.dilate(closed_mask, buffer_kernel, iterations=1)
 
         print(f"         [Otsu Baseline: {otsu_val:.1f} | Safety Threshold: {safety_threshold}]")

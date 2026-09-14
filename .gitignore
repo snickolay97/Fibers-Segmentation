@@ -1,6 +1,14 @@
-# Ignore images and raw data
-data/
+# Track only application code and this ignore policy at the repository root.
+/*
+!/.gitignore
+!/main.py
+!/src/
+!/tools/
 
-# Ignore Python cache and environment
+# Never include generated Python files, environments or local secrets.
 __pycache__/
+*.py[cod]
+.venv/
 venv/
+.env
+.env.*

@@ -1,431 +1,305 @@
-import os
+"""Adaptive slicing with exact pixel ownership and whole-component allocation.
+
+Search boundaries are proposals. Only the validated ownership partition is
+exported. The guarantee concerns 8-connected components of the supplied obstacle
+mask, not objects omitted by that mask or objects cropped by the source image.
+"""
 import json
+import os
+import tempfile
+import time
+from pathlib import Path
 import cv2
 import numpy as np
-import imageio
 from skimage.graph import MCP_Geometric
-from typing import Tuple, Optional, List
-
 from src import config
+from src.tile_scale import scale_metadata, fixed_canvas
+from src.search_animation import save_search_animation
+from src.partition_geometry import (checked_imwrite, connected_components_striped,
+                                    render_overview)
+
 
 class SmartSlicer:
-    """
-    BLOCK 2: Smart Slicer Node.
-    Performs dynamic corridor-first backoff and Dijkstra seam finding.
-    Supports animated GIF generation of pathfinding searches and optional raw tile export.
-    """
-
-    def __init__(self,
-                 target_size: int = config.TARGET_SIZE,
-                 margin_start: int = config.MARGIN_START,
-                 margin_end: int = config.MARGIN_END,
-                 enable_animation: bool = config.ENABLE_ANIMATIONS,
-                 animation_dir: str = config.ANIMATION_DIR,
-                 min_corridor_width: int = config.MIN_CORRIDOR_WIDTH,
-                 save_raw_tiles: bool = config.SAVE_RAW_TILES):
-
-        self.base_step = margin_start
-        self.max_step = margin_end
-        self.target_size = target_size
-        self.min_corridor_width = min_corridor_width
-
-        self.dynamic_step = config.DYNAMIC_EXPANSION_STEP
-        self.min_margin_limit = config.MIN_MARGIN_LIMIT
-        self.obstacle_penalty = config.SEAM_OBSTACLE_PENALTY
-
-        self.enable_animation = enable_animation
-        self.animation_dir = animation_dir
+    def __init__(self, target_size=config.TARGET_SIZE, margin_start=config.MARGIN_START,
+                 margin_end=config.MARGIN_END, enable_animation=config.ENABLE_ANIMATIONS,
+                 animation_dir=config.ANIMATION_DIR, min_corridor_width=config.MIN_CORRIDOR_WIDTH,
+                 save_raw_tiles=config.SAVE_RAW_TILES, dynamic_step=None, min_margin_limit=None,
+                 oversized_policy=None):
+        self.target_size, self.base_step, self.max_step = map(int, (target_size, margin_start, margin_end))
+        self.dynamic_step = int(config.DYNAMIC_EXPANSION_STEP if dynamic_step is None else dynamic_step)
+        self.min_margin_limit = int(config.MIN_MARGIN_LIMIT if min_margin_limit is None else min_margin_limit)
+        self.min_corridor_width = int(min_corridor_width)
+        self.enable_animation, self.animation_dir = enable_animation, animation_dir
         self.save_raw_tiles = save_raw_tiles
-
-        if self.enable_animation:
-            os.makedirs(self.animation_dir, exist_ok=True)
+        self.oversized_policy = oversized_policy or getattr(config, 'OVERSIZED_OBJECT_POLICY', 'preserve')
+        if not (0 < self.min_margin_limit <= self.base_step < self.max_step <= self.target_size):
+            raise ValueError('Require 0 < min_margin_limit <= margin_start < margin_end <= target_size')
+        if self.dynamic_step <= 0 or self.min_corridor_width <= 0:
+            raise ValueError('Search step and corridor width must be positive')
+        if self.oversized_policy not in ('preserve', 'error'):
+            raise ValueError('oversized_policy must be preserve or error')
+        self.search_stats = {}
 
     @staticmethod
-    def _find_safe_corridor_cut(sums: np.ndarray, min_width: int) -> Optional[int]:
-        """Finds widest continuous zero-obstacle corridor."""
-        zero_runs = []
-        in_run = False
-        start_idx = 0
+    def _find_safe_corridor_cut(sums, min_width):
+        zero = np.asarray(sums) == 0
+        changes = np.diff(np.r_[False, zero, False].astype(np.int8))
+        starts, ends = np.flatnonzero(changes == 1), np.flatnonzero(changes == -1)
+        widths = ends - starts
+        for limit in (min_width, max(3, min_width // 2)):
+            eligible = np.flatnonzero(widths >= limit)
+            if eligible.size:
+                best = eligible[np.argmax(widths[eligible])]
+                return int((starts[best] + ends[best] - 1) // 2)
+        return None
 
-        for i, val in enumerate(sums):
-            if val == 0:
-                if not in_run:
-                    in_run = True
-                    start_idx = i
-            else:
-                if in_run:
-                    in_run = False
-                    run_len = i - start_idx
-                    if run_len >= min_width:
-                        zero_runs.append((start_idx, i - 1, run_len))
+    def find_topographical_seam(self, mask_zone, axis):
+        if axis not in ('vertical', 'horizontal'):
+            raise ValueError('axis must be vertical or horizontal')
+        zone = mask_zone if axis == 'vertical' else mask_zone.T
+        h, w = zone.shape
+        if not h or not w:
+            return np.array([], dtype=int), float('inf')
+        free = np.ascontiguousarray(zone == 0, dtype=np.uint8)
+        if not free[0].any() or not free[-1].any():
+            return np.array([], dtype=int), float('inf')
+        distance = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+        costs = 1.0 / (distance ** config.SEAM_REPULSION_POWER + 1e-3)
+        costs[free == 0] = np.inf
+        # Directed offsets give exactly one point per row. This prevents the
+        # lossy projection of an unrestricted path onto seam[row] in v1.
+        mcp = MCP_Geometric(costs, offsets=[(1, -1), (1, 0), (1, 1)])
+        starts = [(0, int(x)) for x in np.flatnonzero(free[0])]
+        ends = [(h - 1, int(x)) for x in np.flatnonzero(free[-1])]
+        cumulative, _ = mcp.find_costs(starts, ends=ends, find_all_ends=False)
+        x = int(np.argmin(cumulative[-1]))
+        cost = float(cumulative[-1, x])
+        if not np.isfinite(cost):
+            return np.array([], dtype=int), float('inf')
+        path = np.asarray(mcp.traceback((h - 1, x)), dtype=int)
+        if len(path) != h or not np.array_equal(path[:, 0], np.arange(h)):
+            raise RuntimeError('Non-monotone path from directed solver')
+        seam = path[:, 1]
+        if np.any(zone[np.arange(h), seam]):
+            raise RuntimeError('Path crosses an obstacle')
+        return seam, cost
 
-        if in_run and (len(sums) - start_idx) >= min_width:
-            zero_runs.append((start_idx, len(sums) - 1, len(sums) - start_idx))
+    def _boundary(self, block):
+        """Vertical boundary in local coordinates; None means deferred routing."""
+        h, w = block.shape
+        trials = []
+        def finish(seam, method):
+            if self.enable_animation and hasattr(self, '_animation_name'):
+                self._animation_counter += 1
+                save_search_animation(Path(self.animation_dir)/self._animation_name,
+                    self._animation_name,self._animation_counter,self._animation_axis,
+                    self._animation_origin,block,self._animation_background,trials,seam,method,
+                    getattr(config,'ANIMATION_MAX_TRIAL_FRAMES',24))
+            return seam
+        if w <= self.base_step:
+            self.search_stats['edge'] += 1
+            return np.full(h, w, dtype=int)
+        width = self.max_step - self.base_step
+        # Compute the projection once, instead of summing overlapping windows.
+        projection = np.any(block[:, :self.max_step], axis=0)
+        for offset in range(self.base_step, self.min_margin_limit - 1, -self.dynamic_step):
+            trials.append([offset,min(offset+width,w)])
+            cut = self._find_safe_corridor_cut(projection[offset:min(offset + width, w)], self.min_corridor_width)
+            if cut is not None:
+                self.search_stats['corridor'] += 1
+                return finish(np.full(h, offset + cut, dtype=int),'straight corridor')
+        trials.append([self.base_step,min(self.max_step,w)])
+        seam, cost = self.find_topographical_seam(block[:, self.base_step:self.max_step], 'vertical')
+        if np.isfinite(cost):
+            self.search_stats['dijkstra'] += 1
+            return finish(seam+self.base_step,'Dijkstra')
+        self.search_stats['deferred'] += 1
+        return finish(None,'unreachable')
 
-        if not zero_runs:
-            relaxed_width = max(3, min_width // 2)
-            for i, val in enumerate(sums):
-                if val == 0:
-                    if not in_run:
-                        in_run = True
-                        start_idx = i
-                else:
-                    if in_run:
-                        in_run = False
-                        if (i - start_idx) >= relaxed_width:
-                            zero_runs.append((start_idx, i - 1, i - start_idx))
+    def _proposal_partition(self, mask, owners):
+        h, w = mask.shape
+        records = []
+        self.search_stats = dict(edge=0, corridor=0, dijkstra=0, deferred=0)
 
-        if not zero_runs:
-            return None
+        def add(x1, y1, x2, y2, local, kind):
+            view = owners[y1:y2, x1:x2]
+            valid = local & (view == 0)
+            if valid.any():
+                tid = len(records) + 1
+                view[valid] = tid
+                records.append(dict(id=tid, x1=x1, y1=y1, x2=x2, y2=y2, kind=kind))
 
-        best_run = max(zero_runs, key=lambda r: r[2])
-        return (best_run[0] + best_run[1]) // 2
-
-    def find_topographical_seam(self, mask_zone: np.ndarray, axis: str) -> Tuple[np.ndarray, float]:
-        h, w = mask_zone.shape
-        if h == 0 or w == 0:
-            return np.array([]), float('inf')
-
-        bg_mask = (mask_zone == 0).astype(np.uint8)
-        dist = cv2.distanceTransform(bg_mask, cv2.DIST_L2, 5)
-
-        cost_map = 1.0 / (dist ** config.SEAM_REPULSION_POWER + 1e-3)
-        cost_map[mask_zone > 0] = self.obstacle_penalty
-
-        mcp = MCP_Geometric(cost_map)
-
-        if axis == 'vertical':
-            starts = [[0, c] for c in range(w)]
-            cumulative_costs, _ = mcp.find_costs(starts)
-            ends = [[h - 1, c] for c in range(w)]
-        else:
-            starts = [[r, 0] for r in range(h)]
-            cumulative_costs, _ = mcp.find_costs(starts)
-            ends = [[r, w - 1] for r in range(h)]
-
-        min_cost = float('inf')
-        best_end = None
-        for end_pt in ends:
-            cst = cumulative_costs[tuple(end_pt)]
-            if cst < min_cost:
-                min_cost = cst
-                best_end = tuple(end_pt)
-
-        if best_end is None:
-            default_val = w // 2 if axis == 'vertical' else h // 2
-            return np.full(h if axis == 'vertical' else w, default_val), float('inf')
-
-        path = mcp.traceback(best_end)
-        seam = np.full(h if axis == 'vertical' else w, -1, dtype=int)
-        for py, px in path:
-            if axis == 'vertical':
-                seam[py] = px
-            else:
-                seam[px] = py
-
-        limit = len(seam)
-        for i in range(1, limit):
-            if seam[i] == -1: seam[i] = seam[i - 1]
-        for i in range(limit - 2, -1, -1):
-            if seam[i] == -1: seam[i] = seam[i + 1]
-
-        return seam, min_cost
-
-    def _create_search_gif(self, mask_block: np.ndarray,
-                           scanned_zones: List[Tuple[int, int, str]],
-                           straight_seam: Optional[int],
-                           dijkstra_seam: Optional[np.ndarray],
-                           save_name: str):
-        """Generates dynamic pathfinding GIF visualizing straight scans and Dijkstra trajectories."""
-        h, w = mask_block.shape
-        pad_bottom = max(0, self.target_size - h)
-        pad_right = max(0, self.target_size - w)
-        padded_mask = cv2.copyMakeBorder(mask_block, 0, pad_bottom, 0, pad_right, cv2.BORDER_CONSTANT, value=0)
-
-        h_pad, w_pad = padded_mask.shape
-        base_frame = np.zeros((h_pad, w_pad, 3), dtype=np.uint8)
-        base_frame[padded_mask > 0] = [255, 255, 255]
-        base_frame[padded_mask == 0] = [35, 20, 20]
-
-        frames = [base_frame.copy(), base_frame.copy()]
-
-        # Animate corridor scanning steps
-        for x_start, x_end, zone_type in scanned_zones:
-            color = (0, 165, 255) if zone_type == 'forward' else (255, 180, 0)
-            step = max(6, (x_end - x_start) // 10) if x_end > x_start else 1
-
-            for col in range(x_start, x_end, step):
-                if 0 <= col < w_pad:
-                    frame = base_frame.copy()
-                    cv2.line(frame, (int(col), 0), (int(col), h_pad), color, 2)
-                    frames.append(frame)
-
-        draw_frame = base_frame.copy()
-
-        # Render final established seam
-        if straight_seam is not None and 0 <= straight_seam < w_pad:
-            cv2.line(draw_frame, (int(straight_seam), 0), (int(straight_seam), h_pad), (0, 255, 0), 3)
-            frames.append(draw_frame.copy())
-        elif dijkstra_seam is not None and len(dijkstra_seam) > 0:
-            pts = [(int(x), int(y)) for y, x in enumerate(dijkstra_seam) if 0 <= x < w_pad and 0 <= y < h_pad]
-            if pts:
-                chunk_size = max(1, len(pts) // 12)
-                for end_idx in range(chunk_size, len(pts) + chunk_size, chunk_size):
-                    sub_pts = np.array([pts[:min(end_idx, len(pts))]], dtype=np.int32)
-                    frame = base_frame.copy()
-                    cv2.polylines(frame, [sub_pts], False, (0, 255, 0), 3)
-                    frames.append(frame)
-                    draw_frame = frame
-
-        for _ in range(6):
-            frames.append(draw_frame.copy())
-
-        os.makedirs(self.animation_dir, exist_ok=True)
-        gif_path = os.path.join(self.animation_dir, save_name)
-        imageio.mimsave(gif_path, frames, fps=14)
-
-    def _find_x_boundary_with_backoff(self, mask: np.ndarray, x_anchor: int, y_anchor: int,
-                                      y_span: int, W: int) -> Tuple[np.ndarray, Optional[int], Optional[np.ndarray], List]:
-        search_window = self.max_step - self.base_step
-        curr_step = self.base_step
-        scanned_zones = []
-
-        # Phase 1: Straight clear corridor scan across backoff window
-        while curr_step >= self.min_margin_limit:
-            target_x = min(x_anchor + curr_step, W)
-            if target_x >= W:
-                return np.full(y_span - y_anchor, W), W - x_anchor, None, scanned_zones
-
-            x_right_end = min(x_anchor + curr_step + search_window, W)
-            zone_r = mask[y_anchor:y_span, target_x:x_right_end]
-            scanned_zones.append((target_x - x_anchor, x_right_end - x_anchor, 'forward'))
-
-            col_sums_r = np.sum(zone_r, axis=0) if zone_r.size > 0 else np.array([1])
-            cut_r = self._find_safe_corridor_cut(col_sums_r, self.min_corridor_width)
-            if cut_r is not None:
-                abs_x = target_x + cut_r
-                return np.full(y_span - y_anchor, abs_x), abs_x - x_anchor, None, scanned_zones
-
-            curr_step -= self.dynamic_step
-
-        # Phase 2: Dijkstra routing on primary candidate window
-        target_x = min(x_anchor + self.base_step, W)
-        x_right_end = min(target_x + search_window, W)
-        zone_r = mask[y_anchor:y_span, target_x:x_right_end]
-
-        seam_r, cost_r = self.find_topographical_seam(zone_r, 'vertical')
-        if cost_r < self.obstacle_penalty:
-            abs_boundary = seam_r + target_x
-            return abs_boundary, None, seam_r + (target_x - x_anchor), scanned_zones
-
-        # Fallback to standard base step
-        default_x = min(x_anchor + self.base_step, W)
-        return np.full(y_span - y_anchor, default_x), default_x - x_anchor, None, scanned_zones
-
-    def _find_y_boundary_with_backoff(self, mask: np.ndarray, x_anchor: int, y_anchor: int,
-                                      max_local_x: int, H: int) -> np.ndarray:
-        search_window = self.max_step - self.base_step
-        curr_step = self.base_step
-
-        while curr_step >= self.min_margin_limit:
-            target_y = min(y_anchor + curr_step, H)
-            if target_y >= H:
-                return np.full(max_local_x - x_anchor, H)
-
-            y_down_end = min(y_anchor + curr_step + search_window, H)
-            zone_b = mask[target_y:y_down_end, x_anchor:max_local_x]
-
-            if zone_b.size == 0:
-                return np.full(max_local_x - x_anchor, target_y)
-
-            row_sums = np.sum(zone_b, axis=1)
-            cut_b = self._find_safe_corridor_cut(row_sums, self.min_corridor_width)
-            if cut_b is not None:
-                return np.full(max_local_x - x_anchor, target_y + cut_b)
-
-            curr_step -= self.dynamic_step
-
-        # Dijkstra fallback on base window
-        target_y = min(y_anchor + self.base_step, H)
-        y_down_end = min(target_y + search_window, H)
-        zone_b = mask[target_y:y_down_end, x_anchor:max_local_x]
-
-        seam_b, cost_b = self.find_topographical_seam(zone_b, 'horizontal')
-        if cost_b < self.obstacle_penalty:
-            return seam_b + target_y
-
-        return np.full(max_local_x - x_anchor, min(y_anchor + self.base_step, H))
-
-    def _generate_global_tile_index_map(self, raw_img: np.ndarray, tile_records: List[dict],
-                                        output_dir: str, base_name: str):
-        overview_dim = config.OVERVIEW_MAP_SIZE
-        H, W = raw_img.shape[:2]
-        scale = overview_dim / max(H, W)
-        new_w, new_h = int(W * scale), int(H * scale)
-
-        print(f"   - Generating High-Resolution Tile Index Map ({new_w}x{new_h} px)...")
-
-        thumb = cv2.resize(raw_img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-        overview_bgr = cv2.cvtColor(thumb, cv2.COLOR_GRAY2BGR) if thumb.ndim == 2 else thumb.copy()
-
-        font = cv2.FONT_HERSHEY_SIMPLEX
-        cv2.rectangle(overview_bgr, (0, 0), (new_w - 1, new_h - 1), (0, 180, 180), 2)
-
-        for rec in tile_records:
-            t_id = rec['id']
-            x1, y1 = int(rec['x1'] * scale), int(rec['y1'] * scale)
-            x2, y2 = min(new_w - 1, int(rec['x2'] * scale)), min(new_h - 1, int(rec['y2'] * scale))
-
-            if 'r_seam' in rec and len(rec['r_seam']) > 1:
-                r_pts = (np.array(rec['r_seam'], dtype=np.float32) * scale).astype(np.int32)
-                cv2.polylines(overview_bgr, [r_pts], False, (0, 255, 255), 2, cv2.LINE_AA)
-            elif x2 < new_w - 2:
-                cv2.line(overview_bgr, (x2, y1), (x2, y2), (0, 255, 255), 2)
-
-            if 'b_seam' in rec and len(rec['b_seam']) > 1:
-                b_pts = (np.array(rec['b_seam'], dtype=np.float32) * scale).astype(np.int32)
-                cv2.polylines(overview_bgr, [b_pts], False, (0, 255, 255), 2, cv2.LINE_AA)
-            elif y2 < new_h - 2:
-                cv2.line(overview_bgr, (x1, y2), (x2, y2), (0, 255, 255), 2)
-
-            if rec['x1'] == 0:
-                cv2.line(overview_bgr, (0, y1), (0, y2), (0, 255, 255), 2)
-            if rec['y1'] == 0:
-                cv2.line(overview_bgr, (x1, 0), (x2, 0), (0, 255, 255), 2)
-
-            label = f"#{t_id:04d}"
-            font_scale = max(0.65, min(1.2, (x2 - x1) / 450.0))
-            thickness = max(2, int(font_scale * 2.2))
-            (tw, th), baseline = cv2.getTextSize(label, font, font_scale, thickness)
-            tx, ty = x1 + 12, y1 + th + 12
-
-            cv2.rectangle(overview_bgr, (tx - 5, ty - th - 5), (tx + tw + 6, ty + baseline + 4), (0, 0, 0), -1)
-            cv2.rectangle(overview_bgr, (tx - 5, ty - th - 5), (tx + tw + 6, ty + baseline + 4), (0, 255, 0), 1)
-            cv2.putText(overview_bgr, label, (tx, ty), font, font_scale, (0, 255, 0), thickness, cv2.LINE_AA)
-
-        map_path = os.path.join(output_dir, f"{base_name}_TILE_INDEX_MAP_{overview_dim}px.png")
-        cv2.imwrite(map_path, overview_bgr)
-        print(f"   [OK] High-Resolution Puzzle Map saved to: {map_path}")
-
-    def slice(self, filtered_img: np.ndarray, raw_img: np.ndarray, mask: np.ndarray,
-              base_name: str, output_dir: str, raw_output_dir: Optional[str] = None):
-        H, W = mask.shape[:2]
-        extracted_mask = np.zeros((H, W), dtype=bool)
-
-        y_anchor = 0
-        tile_count = 0
-        tile_records = []
-
-        overview_dir = os.path.join(output_dir, 'overview')
-        os.makedirs(overview_dir, exist_ok=True)
-
-        print(f"   - Slicing {W}x{H} image with Dynamic Back-Off (Save Raw Tiles: {self.save_raw_tiles}, Animations: {self.enable_animation})...")
-
-        while y_anchor < H:
-            x_anchor = 0
-            bottom_seams = []
-
-            while x_anchor < W:
-                tile_count += 1
-                y_span = min(y_anchor + self.target_size, H)
-                x_span = min(x_anchor + self.target_size, W)
-
-                R_boundary, straight_seam, dijkstra_seam, scanned_zones = self._find_x_boundary_with_backoff(
-                    mask, x_anchor, y_anchor, y_span, W
-                )
-
-                # Generate animated GIF visualization if enabled
+        ya = 0
+        while ya < h:
+            xa, bottoms = 0, []
+            while xa < w:
+                span = min(ya + self.target_size, h)
+                block = mask[ya:span, xa:min(xa + self.target_size, w)]
                 if self.enable_animation:
-                    anim_block = mask[y_anchor:y_span, x_anchor:x_span]
-                    if anim_block.size > 0:
-                        gif_name = f"{base_name}_{tile_count:04d}_X_Cut.gif"
-                        self._create_search_gif(
-                            mask_block=anim_block,
-                            scanned_zones=scanned_zones,
-                            straight_seam=straight_seam,
-                            dijkstra_seam=dijkstra_seam,
-                            save_name=gif_name
-                        )
+                    self._animation_axis='right';self._animation_origin=(xa,ya)
+                    self._animation_background=self._animation_image[ya:span,xa:min(xa+self.target_size,w)]
+                right = self._boundary(block)
+                deferred = right is None
+                if deferred:
+                    right = np.full(len(block), min(self.base_step, w - xa), dtype=int)
+                mx = int(right.max())
+                if self.enable_animation:
+                    self._animation_axis='bottom'
+                    self._animation_background=self._animation_image[ya:min(ya+self.target_size,h),xa:xa+mx].swapaxes(0,1)
+                bottom = self._boundary(mask[ya:min(ya + self.target_size, h), xa:xa + mx].T)
+                deferred |= bottom is None
+                if bottom is None:
+                    bottom = np.full(mx, min(self.base_step, h - ya), dtype=int)
+                my = int(bottom.max())
+                local = (np.arange(mx)[None, :] < right[:my, None]) & (np.arange(my)[:, None] < bottom[None, :])
+                add(xa, ya, xa + mx, ya + my, local, 'provisional' if deferred else 'adaptive')
+                xa += max(1, int(right.min()))
+                bottoms.append(ya + int(bottom.min()))
+            ya = min(bottoms) if bottoms else min(ya + self.base_step, h)
+        # Coverage is checked explicitly even for irregular row intersections.
+        for y in range(0, h, self.target_size):
+            for x in range(0, w, self.target_size):
+                x2, y2 = min(x + self.target_size, w), min(y + self.target_size, h)
+                if np.any(owners[y:y2, x:x2] == 0):
+                    add(x, y, x2, y2, np.ones((y2-y, x2-x), bool), 'coverage_repair')
+        return records
 
-                max_local_x = max(R_boundary) if R_boundary.size > 0 else W
-                B_boundary = self._find_y_boundary_with_backoff(
-                    mask, x_anchor, y_anchor, max_local_x, H
-                )
+    def _allocate_components(self, labels, stats, owners, records):
+        h, w = labels.shape
+        repaired, oversized = 0, 0
+        component_owner = np.zeros(len(stats), np.int32)
+        for component in range(1, len(stats)):
+            x1, y1, x2, y2 = [int(v) for v in stats[component, :4]]
+            candidates = [r for r in records if r['x1'] <= x1 and r['y1'] <= y1 and r['x2'] >= x2 and r['y2'] >= y2]
+            if candidates:
+                # Preserve an already intact component. Choosing the first
+                # enclosing rectangle creates unnecessary islands across seams.
+                votes = {}
+                for yy in range(y1,y2,256):
+                    stop = min(yy+256,y2)
+                    ids, nums = np.unique(owners[yy:stop,x1:x2][labels[yy:stop,x1:x2] == component], return_counts=True)
+                    for owner,num in zip(ids,nums):
+                        votes[int(owner)] = votes.get(int(owner),0)+int(num)
+                rec = max(candidates,key=lambda r:votes.get(r['id'],0))
+            else:
+                big = x2-x1 > self.target_size or y2-y1 > self.target_size
+                if big and self.oversized_policy == 'error':
+                    raise ValueError('Component {} needs {}x{} pixels, larger than target'.format(component, x2-x1, y2-y1))
+                cw, ch = max(self.target_size, x2-x1), max(self.target_size, y2-y1)
+                xx = max(0, min((x1 + x2 - cw)//2, w-cw))
+                yy = max(0, min((y1 + y2 - ch)//2, h-ch))
+                rec = dict(id=len(records)+1, x1=xx, y1=yy, x2=min(w, xx+cw), y2=min(h, yy+ch), kind='oversized_component' if big else 'component_crop')
+                records.append(rec)
+                oversized += int(big)
+            tid = rec['id']
+            changed = False
+            for y in range(y1, y2, 256):
+                stop = min(y+256, y2)
+                valid = labels[y:stop, x1:x2] == component
+                view = owners[y:stop, x1:x2]
+                changed |= bool(np.any(view[valid] != tid))
+                view[valid] = tid
+            repaired += int(changed)
+            component_owner[component] = tid
+        # Validate independently by scanning the final partition. This also
+        # catches diagonal components split by intersecting search proposals.
+        covered = 0
+        for y in range(0, h, 256):
+            lab, own = labels[y:y+256], owners[y:y+256]
+            if np.any(own == 0):
+                raise RuntimeError('Unowned source pixels')
+            protected = lab > 0
+            if np.any(own[protected] != component_owner[lab[protected]]):
+                raise RuntimeError('A protected component spans multiple tiles')
+            covered += int(np.count_nonzero(own))
+        return dict(protected_components=len(stats)-1, reassigned_components=repaired,
+                    oversized_crops=oversized, split_protected_components=0,
+                    covered_pixels=covered, total_pixels=h*w)
 
-                max_x = max(R_boundary) if R_boundary.size > 0 else W
-                max_y = max(B_boundary) if B_boundary.size > 0 else H
-
-                local_mask = np.ones((max_y - y_anchor, max_x - x_anchor), dtype=bool)
-
-                for i, r_val in enumerate(R_boundary):
-                    if i < local_mask.shape[0] and r_val - x_anchor < local_mask.shape[1]:
-                        local_mask[i, max(0, r_val - x_anchor):] = False
-
-                for j, b_val in enumerate(B_boundary):
-                    if j < local_mask.shape[1] and b_val - y_anchor < local_mask.shape[0]:
-                        local_mask[max(0, b_val - y_anchor):, j] = False
-
-                available_pixels = ~extracted_mask[y_anchor:max_y, x_anchor:max_x]
-                final_tile_mask = local_mask & available_pixels
-
-                if not np.any(final_tile_mask):
-                    x_anchor = min(R_boundary) if R_boundary.size > 0 else W
-                    continue
-
-                extracted_mask[y_anchor:max_y, x_anchor:max_x] |= final_tile_mask
-
-                tile_img = filtered_img[y_anchor:max_y, x_anchor:max_x].copy()
-                tile_img[~final_tile_mask] = 0
-
-                pad_bottom = max(0, self.target_size - tile_img.shape[0])
-                pad_right = max(0, self.target_size - tile_img.shape[1])
-                padded_tile = cv2.copyMakeBorder(tile_img, 0, pad_bottom, 0, pad_right, cv2.BORDER_CONSTANT, value=0)
-
-                save_name = f"{base_name}_tile_{tile_count:04d}.png"
-                cv2.imwrite(os.path.join(output_dir, save_name), padded_tile)
-
-                # Conditionally save raw tile only if toggle is True
-                if self.save_raw_tiles and raw_output_dir is not None:
-                    raw_tile_img = raw_img[y_anchor:max_y, x_anchor:max_x].copy()
-                    raw_tile_img[~final_tile_mask] = 0
-                    padded_raw = cv2.copyMakeBorder(raw_tile_img, 0, pad_bottom, 0, pad_right, cv2.BORDER_CONSTANT, value=0)
-                    cv2.imwrite(os.path.join(raw_output_dir, save_name), padded_raw)
-
-                step = 15
-                r_seam_pts = [
-                    [int(r_val), int(y_anchor + idx)]
-                    for idx, r_val in enumerate(R_boundary)
-                    if idx % step == 0 or idx == len(R_boundary) - 1
-                ]
-                b_seam_pts = [
-                    [int(x_anchor + jdx), int(b_val)]
-                    for jdx, b_val in enumerate(B_boundary)
-                    if jdx % step == 0 or jdx == len(B_boundary) - 1
-                ]
-
-                tile_records.append({
-                    'id': tile_count,
-                    'x1': int(x_anchor),
-                    'y1': int(y_anchor),
-                    'x2': int(max_x),
-                    'y2': int(max_y),
-                    'r_seam': r_seam_pts,
-                    'b_seam': b_seam_pts
-                })
-
-                x_anchor = min(R_boundary) if R_boundary.size > 0 else W
-                if B_boundary.size > 0:
-                    bottom_seams.append(min(B_boundary))
-
-            y_anchor = min(bottom_seams) if bottom_seams else y_anchor + self.base_step
-
-        coords_path = os.path.join(overview_dir, f"{base_name}_tiles_coords.json")
-        try:
-            with open(coords_path, 'w', encoding='utf-8') as f:
-                json.dump(tile_records, f, indent=2)
-            print(f"   [OK] Coordinates Manifest saved to: {coords_path}")
-        except Exception as e:
-            print(f"   [!] Error saving JSON: {e}")
-
-        self._generate_global_tile_index_map(raw_img, tile_records, overview_dir, base_name)
-        print(f"   - Finished! Generated {tile_count} tailored tiles with zero object cuts.")
+    def slice(self, filtered_img, raw_img, mask, base_name, output_dir, raw_output_dir=None):
+        if mask.ndim != 2 or not mask.size or filtered_img.shape != mask.shape or raw_img.shape[:2] != mask.shape:
+            raise ValueError('Expect nonempty 2D filtered/mask arrays and matching raw image dimensions')
+        if filtered_img.dtype != np.uint8 or raw_img.dtype not in (np.uint8, np.uint16):
+            raise ValueError('Expected uint8 filtered image and uint8/uint16 raw data')
+        out = Path(output_dir)
+        raw_out = Path(raw_output_dir) if self.save_raw_tiles and raw_output_dir else None
+        if self.save_raw_tiles and raw_out is None:
+            raise ValueError('raw_output_dir is required when save_raw_tiles=True')
+        for folder in [out] + ([raw_out] if raw_out else []):
+            if list(folder.glob(base_name + '_tile_*.png')):
+                raise FileExistsError('Choose a new output directory; existing tiles will not be overwritten: {}'.format(folder))
+            folder.mkdir(parents=True, exist_ok=True)
+        if self.enable_animation:
+            self._animation_name=base_name;self._animation_counter=0
+            self._animation_image=raw_img
+        started = time.perf_counter()
+        h, w = mask.shape
+        with tempfile.TemporaryDirectory(prefix='.partition_', dir=str(out)) as work:
+            owners = np.memmap(os.path.join(work, 'owners.dat'), dtype=np.int32, mode='w+', shape=(h,w))
+            labels = np.memmap(os.path.join(work, 'labels.dat'), dtype=np.int32, mode='w+', shape=(h,w))
+            try:
+                print('   - Building adaptive proposals...', flush=True)
+                records = self._proposal_partition(mask, owners)
+                print('   - Labelling protected components in strips...', flush=True)
+                stats = connected_components_striped(mask, labels)
+                print('   - Assigning {} complete components...'.format(len(stats)-1), flush=True)
+                checks = self._allocate_components(labels, stats, owners, records)
+                counts = np.zeros(len(records)+1, np.int64)
+                for y in range(0,h,256):
+                    counts += np.bincount(owners[y:y+256].ravel(), minlength=len(counts))
+                records = [r for r in records if counts[r['id']]]
+                for folder in [out] + ([raw_out] if raw_out else []):
+                    (folder/'valid_masks').mkdir(exist_ok=True)
+                    (folder/'overview').mkdir(exist_ok=True)
+                    (folder/'native').mkdir(exist_ok=True)
+                    if getattr(config,'SAVE_COVERAGE_MASKS',False):
+                        (folder/'coverage_masks').mkdir(exist_ok=True)
+                for i, rec in enumerate(records):
+                    x1,y1,x2,y2 = [rec[k] for k in ('x1','y1','x2','y2')]
+                    valid = owners[y1:y2,x1:x2] == rec['id']
+                    if int(valid.sum()) != counts[rec['id']]:
+                        raise RuntimeError('Tile ownership extends outside its stored crop')
+                    rec['valid_mask'] = 'valid_masks/valid_{:04d}.png'.format(rec['id'])
+                    rec['filename'] = '{}_tile_{:04d}.png'.format(base_name,rec['id'])
+                    rec['valid_pixels'] = int(valid.sum())
+                    rec['canvas_shape'] = [self.target_size,self.target_size]
+                    rec['native_filename'] = 'native/native_{:04d}.png'.format(rec['id'])
+                    if getattr(config,'SAVE_COVERAGE_MASKS',False):
+                        rec['coverage_mask'] = 'coverage_masks/coverage_{:04d}.png'.format(rec['id'])
+                    rec['transform'] = scale_metadata(y2-y1,x2-x1,self.target_size)
+                    coverage = fixed_canvas(valid.astype(np.uint8)*255,rec['transform'],mask=True) if getattr(config,'SAVE_COVERAGE_MASKS',False) else None
+                    raw_crop=raw_img[y1:y2,x1:x2]
+                    if raw_crop.ndim == 2 and raw_crop.dtype == np.uint8:
+                        rec['quality']={'raw_fraction_ge_250':float(np.mean(raw_crop[valid]>=250))}
+                        rec['quality']['review_bright_region']=rec['quality']['raw_fraction_ge_250']>.01
+                    for folder,source in [(out,filtered_img)] + ([(raw_out,raw_img)] if raw_out else []):
+                        tile = source[y1:y2,x1:x2].copy()
+                        tile[~valid] = 0
+                        checked_imwrite(folder/rec['native_filename'],tile)
+                        checked_imwrite(folder/rec['filename'],fixed_canvas(tile,rec['transform']))
+                        checked_imwrite(folder/rec['valid_mask'],valid.astype(np.uint8)*255)
+                        if coverage is not None:
+                            checked_imwrite(folder/rec['coverage_mask'],coverage)
+                    if (i+1)%25==0:
+                        print('   - Saved {}/{} tiles'.format(i+1,len(records)),flush=True)
+                checks.update(tile_count=len(records), search=self.search_stats, search_animations=getattr(self,'_animation_counter',0),
+                              seconds_before_overview=round(time.perf_counter()-started,3))
+                manifest = dict(schema_version=3, source_name=base_name, image_shape=[h,w],
+                                guarantee='8-connected components of the supplied obstacle mask',
+                                parameters=dict(target_size=self.target_size,margin_start=self.base_step,margin_end=self.max_step,dynamic_step=self.dynamic_step,min_margin_limit=self.min_margin_limit,min_corridor_width=self.min_corridor_width,oversized_policy=self.oversized_policy),
+                                checks=checks, tiles=records)
+                for folder in [out] + ([raw_out] if raw_out else []):
+                    with open(str(folder/'overview'/(base_name+'_tiles_coords.json')),'w',encoding='utf-8') as handle:
+                        json.dump(manifest,handle,indent=2)
+                print('   - Rendering ownership boundaries...',flush=True)
+                overview = render_overview(raw_img,owners,records,config.OVERVIEW_MAP_SIZE)
+                checked_imwrite(out/'overview'/(base_name+'_TILE_INDEX_MAP_{}px.png'.format(config.OVERVIEW_MAP_SIZE)),overview)
+                print('   - Validated: {} tiles, {} protected components, zero component splits.'.format(len(records),len(stats)-1),flush=True)
+                return manifest
+            finally:
+                # Release views before TemporaryDirectory removes mapped files on Windows.
+                for attr in ('_animation_image','_animation_background'):
+                    if hasattr(self,attr):delattr(self,attr)
+                for array in (owners,labels):
+                    array.flush()
+                    array._mmap.close()

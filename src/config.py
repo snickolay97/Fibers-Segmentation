@@ -6,8 +6,8 @@ import os
 
 # Directory Paths
 INPUT_DIR = 'data/1_raw_large_images'
-OUTPUT_DIR = 'data/2_sliced_tiles'
-RAW_OUTPUT_DIR = 'data/3_raw_sliced_tiles'
+OUTPUT_DIR = 'data/2_sliced_tiles_1500'
+RAW_OUTPUT_DIR = 'data/3_raw_sliced_tiles_1500'
 
 # Block 3 & ML Paths
 LABELS_DIR = 'data/3_sam_labels'        # Place .txt annotation files from CVAT/SAM here
@@ -17,11 +17,11 @@ FEATURES_DIR = 'data/4_final_results'   # The final CSV/Excel files will be save
 # PERFORMANCE & VISUALIZATION TOGGLES
 # ==============================================================================
 # 1. Animations Toggle (generates step-by-step GIF for each seam pathfinding)
-ENABLE_ANIMATIONS = True                # Set to True to generate pathfinding GIFs
+ENABLE_ANIMATIONS = False               # Actual search-window trials and accepted route reveal
 ANIMATION_DIR = 'data/animations'
 
 # 2. Raw Tiles Toggle (saves un-filtered raw tiles mapped to the exact same seams)
-SAVE_RAW_TILES = True                  # Set to True only when raw tiles are required
+SAVE_RAW_TILES = False                  # Set to True only when raw tiles are required
 
 # 3. Overview Map Resolution (canonical puzzle map size in px)
 OVERVIEW_MAP_SIZE = 8000
@@ -29,18 +29,19 @@ OVERVIEW_MAP_SIZE = 8000
 # ==============================================================================
 # ADAPTIVE GRID PARAMETERS (SMART SLICER)
 # ==============================================================================
-TARGET_SIZE = 2000                      # Strict output canvas size with zero-padding (px)
-MARGIN_START = 1500                     # Where seam search window begins relative to anchor
-MARGIN_END = 1950                       # Maximum boundary coordinate where seam search window ends
+TARGET_SIZE = 1500                      # Every model tile is this square size; native crops retained
+OVERSIZED_OBJECT_POLICY = 'preserve'    # 'preserve' larger canvases, or 'error' before exporting
+MARGIN_START = int(TARGET_SIZE * 0.75)                     # Where seam search window begins relative to anchor
+MARGIN_END = int(TARGET_SIZE * 0.975)                       # Maximum boundary coordinate where seam search window ends
 
 # Dynamic Back-off Parameters (If obstacles block corridor/seam, step window backwards)
-DYNAMIC_EXPANSION_STEP = 30             # Step size in pixels when backing off
-MIN_MARGIN_LIMIT = 500                  # Minimum allowed tile width before fallback forced cut
+DYNAMIC_EXPANSION_STEP = max(1, int(TARGET_SIZE * 0.015))             # Step size in pixels when backing off
+MIN_MARGIN_LIMIT = max(1, int(TARGET_SIZE * 0.25))                  # Minimum offset in the straight-corridor search
 MIN_CORRIDOR_WIDTH = 15                 # Minimum zero-intensity run for an obstacle-free straight cut
 
 # Dijkstra Algorithm Parameters
 SEAM_REPULSION_POWER = 1.5              # Repulsion gradient steepness from fiber boundaries
-SEAM_OBSTACLE_PENALTY = 1000000.0       # Prohibitive cost: forces trajectory around fibers
+SEAM_OBSTACLE_PENALTY = float('inf')    # Obstacles are forbidden in the v2 path solver
 
 # ==============================================================================
 # GLOBAL PREPROCESSOR (BLOCK 1)
@@ -71,3 +72,10 @@ FRANGI_SENSITIVITY = 0.12
 GRAPH_COLLINEARITY_COS_THRESH = -0.65
 GRAPH_BRANCH_PROBE_DIST = 8
 BRIDGE_MAX_INTENSITY_RATIO = 0.65
+
+# Auxiliary output: only enable model coverage PNGs when a trainer consumes them.
+SAVE_COVERAGE_MASKS = False
+ANIMATION_MAX_TRIAL_FRAMES = 24
+# Protective morphology, independent of the image display filters.
+BRIDGE_KERNEL_SIZE = 17
+BUFFER_KERNEL_SIZE = 5
