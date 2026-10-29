@@ -1,0 +1,9 @@
+# Verified scientific environment, Python 3.10+.
+numpy==2.2.5
+opencv-python==4.12.0.88
+scikit-image==0.25.2
+scipy==1.15.3
+pandas==2.3.3
+tifffile==2025.2.18
+Pillow==11.3.0
+PyQt6==6.9.1

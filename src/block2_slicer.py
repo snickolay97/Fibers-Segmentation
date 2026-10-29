@@ -13,6 +13,7 @@ import cv2
 import numpy as np
 from skimage.graph import MCP_Geometric
 from src import config
+from src.app_settings import PipelineSettings, PipelineCancelled
 from src.tile_scale import scale_metadata, fixed_canvas
 from src.search_animation import save_search_animation
 from src.partition_geometry import (checked_imwrite, connected_components_striped,
@@ -24,7 +25,17 @@ class SmartSlicer:
                  margin_end=config.MARGIN_END, enable_animation=config.ENABLE_ANIMATIONS,
                  animation_dir=config.ANIMATION_DIR, min_corridor_width=config.MIN_CORRIDOR_WIDTH,
                  save_raw_tiles=config.SAVE_RAW_TILES, dynamic_step=None, min_margin_limit=None,
-                 oversized_policy=None):
+                 oversized_policy=None, settings=None, progress=None, cancelled=None):
+        self.settings = settings.validate() if settings is not None else None
+        self.progress, self.cancelled = progress, cancelled
+        if settings is not None:
+            target_size = settings.target_size
+            margins = settings.margins()
+            margin_start, margin_end = margins['margin_start'], margins['margin_end']
+            dynamic_step, min_margin_limit = margins['dynamic_step'], margins['min_margin_limit']
+            min_corridor_width = settings.min_corridor_width
+            enable_animation, save_raw_tiles = settings.enable_animations, settings.save_raw_tiles
+            oversized_policy = settings.oversized_policy
         self.target_size, self.base_step, self.max_step = map(int, (target_size, margin_start, margin_end))
         self.dynamic_step = int(config.DYNAMIC_EXPANSION_STEP if dynamic_step is None else dynamic_step)
         self.min_margin_limit = int(config.MIN_MARGIN_LIMIT if min_margin_limit is None else min_margin_limit)
@@ -32,6 +43,10 @@ class SmartSlicer:
         self.enable_animation, self.animation_dir = enable_animation, animation_dir
         self.save_raw_tiles = save_raw_tiles
         self.oversized_policy = oversized_policy or getattr(config, 'OVERSIZED_OBJECT_POLICY', 'preserve')
+        self.overview_size = settings.overview_size if settings is not None else config.OVERVIEW_MAP_SIZE
+        self.seam_repulsion_power = settings.seam_repulsion_power if settings is not None else config.SEAM_REPULSION_POWER
+        self.save_coverage_masks = settings.save_coverage_masks if settings is not None else config.SAVE_COVERAGE_MASKS
+        self.animation_max_trial_frames = settings.animation_max_trial_frames if settings is not None else config.ANIMATION_MAX_TRIAL_FRAMES
         if not (0 < self.min_margin_limit <= self.base_step < self.max_step <= self.target_size):
             raise ValueError('Require 0 < min_margin_limit <= margin_start < margin_end <= target_size')
         if self.dynamic_step <= 0 or self.min_corridor_width <= 0:
@@ -39,6 +54,13 @@ class SmartSlicer:
         if self.oversized_policy not in ('preserve', 'error'):
             raise ValueError('oversized_policy must be preserve or error')
         self.search_stats = {}
+
+    def _checkpoint(self, message=None, current=None, total=None):
+        if self.cancelled and self.cancelled():
+            raise PipelineCancelled('Operation cancelled')
+        if message and self.progress:
+            self.progress(dict(stage='slice', status='running', message=message,
+                               current=current, total=total))
 
     @staticmethod
     def _find_safe_corridor_cut(sums, min_width):
@@ -54,6 +76,7 @@ class SmartSlicer:
         return None
 
     def find_topographical_seam(self, mask_zone, axis):
+        self._checkpoint()
         if axis not in ('vertical', 'horizontal'):
             raise ValueError('axis must be vertical or horizontal')
         zone = mask_zone if axis == 'vertical' else mask_zone.T
@@ -64,7 +87,7 @@ class SmartSlicer:
         if not free[0].any() or not free[-1].any():
             return np.array([], dtype=int), float('inf')
         distance = cv2.distanceTransform(free, cv2.DIST_L2, 5)
-        costs = 1.0 / (distance ** config.SEAM_REPULSION_POWER + 1e-3)
+        costs = 1.0 / (distance ** self.seam_repulsion_power + 1e-3)
         costs[free == 0] = np.inf
         # Directed offsets give exactly one point per row. This prevents the
         # lossy projection of an unrestricted path onto seam[row] in v1.
@@ -72,6 +95,7 @@ class SmartSlicer:
         starts = [(0, int(x)) for x in np.flatnonzero(free[0])]
         ends = [(h - 1, int(x)) for x in np.flatnonzero(free[-1])]
         cumulative, _ = mcp.find_costs(starts, ends=ends, find_all_ends=False)
+        self._checkpoint()
         x = int(np.argmin(cumulative[-1]))
         cost = float(cumulative[-1, x])
         if not np.isfinite(cost):
@@ -94,7 +118,7 @@ class SmartSlicer:
                 save_search_animation(Path(self.animation_dir)/self._animation_name,
                     self._animation_name,self._animation_counter,self._animation_axis,
                     self._animation_origin,block,self._animation_background,trials,seam,method,
-                    getattr(config,'ANIMATION_MAX_TRIAL_FRAMES',24))
+                    self.animation_max_trial_frames)
             return seam
         if w <= self.base_step:
             self.search_stats['edge'] += 1
@@ -103,6 +127,7 @@ class SmartSlicer:
         # Compute the projection once, instead of summing overlapping windows.
         projection = np.any(block[:, :self.max_step], axis=0)
         for offset in range(self.base_step, self.min_margin_limit - 1, -self.dynamic_step):
+            self._checkpoint()
             trials.append([offset,min(offset+width,w)])
             cut = self._find_safe_corridor_cut(projection[offset:min(offset + width, w)], self.min_corridor_width)
             if cut is not None:
@@ -131,8 +156,10 @@ class SmartSlicer:
 
         ya = 0
         while ya < h:
+            self._checkpoint('Searching tile boundaries', ya, h)
             xa, bottoms = 0, []
             while xa < w:
+                self._checkpoint()
                 span = min(ya + self.target_size, h)
                 block = mask[ya:span, xa:min(xa + self.target_size, w)]
                 if self.enable_animation:
@@ -158,6 +185,7 @@ class SmartSlicer:
             ya = min(bottoms) if bottoms else min(ya + self.base_step, h)
         # Coverage is checked explicitly even for irregular row intersections.
         for y in range(0, h, self.target_size):
+            self._checkpoint()
             for x in range(0, w, self.target_size):
                 x2, y2 = min(x + self.target_size, w), min(y + self.target_size, h)
                 if np.any(owners[y:y2, x:x2] == 0):
@@ -169,6 +197,7 @@ class SmartSlicer:
         repaired, oversized = 0, 0
         component_owner = np.zeros(len(stats), np.int32)
         for component in range(1, len(stats)):
+            self._checkpoint('Preserving whole components', component, len(stats)-1)
             x1, y1, x2, y2 = [int(v) for v in stats[component, :4]]
             candidates = [r for r in records if r['x1'] <= x1 and r['y1'] <= y1 and r['x2'] >= x2 and r['y2'] >= y2]
             if candidates:
@@ -176,6 +205,7 @@ class SmartSlicer:
                 # enclosing rectangle creates unnecessary islands across seams.
                 votes = {}
                 for yy in range(y1,y2,256):
+                    self._checkpoint()
                     stop = min(yy+256,y2)
                     ids, nums = np.unique(owners[yy:stop,x1:x2][labels[yy:stop,x1:x2] == component], return_counts=True)
                     for owner,num in zip(ids,nums):
@@ -194,6 +224,7 @@ class SmartSlicer:
             tid = rec['id']
             changed = False
             for y in range(y1, y2, 256):
+                self._checkpoint()
                 stop = min(y+256, y2)
                 valid = labels[y:stop, x1:x2] == component
                 view = owners[y:stop, x1:x2]
@@ -205,6 +236,7 @@ class SmartSlicer:
         # catches diagonal components split by intersecting search proposals.
         covered = 0
         for y in range(0, h, 256):
+            self._checkpoint()
             lab, own = labels[y:y+256], owners[y:y+256]
             if np.any(own == 0):
                 raise RuntimeError('Unowned source pixels')
@@ -216,7 +248,8 @@ class SmartSlicer:
                     oversized_crops=oversized, split_protected_components=0,
                     covered_pixels=covered, total_pixels=h*w)
 
-    def slice(self, filtered_img, raw_img, mask, base_name, output_dir, raw_output_dir=None):
+    def slice(self, filtered_img, raw_img, mask, base_name, output_dir, raw_output_dir=None, run_info=None):
+        self._checkpoint('Preparing tile export')
         if mask.ndim != 2 or not mask.size or filtered_img.shape != mask.shape or raw_img.shape[:2] != mask.shape:
             raise ValueError('Expect nonempty 2D filtered/mask arrays and matching raw image dimensions')
         if filtered_img.dtype != np.uint8 or raw_img.dtype not in (np.uint8, np.uint16):
@@ -241,7 +274,9 @@ class SmartSlicer:
                 print('   - Building adaptive proposals...', flush=True)
                 records = self._proposal_partition(mask, owners)
                 print('   - Labelling protected components in strips...', flush=True)
+                self._checkpoint('Labelling protective components')
                 stats = connected_components_striped(mask, labels)
+                self._checkpoint()
                 print('   - Assigning {} complete components...'.format(len(stats)-1), flush=True)
                 checks = self._allocate_components(labels, stats, owners, records)
                 counts = np.zeros(len(records)+1, np.int64)
@@ -252,9 +287,10 @@ class SmartSlicer:
                     (folder/'valid_masks').mkdir(exist_ok=True)
                     (folder/'overview').mkdir(exist_ok=True)
                     (folder/'native').mkdir(exist_ok=True)
-                    if getattr(config,'SAVE_COVERAGE_MASKS',False):
+                    if self.save_coverage_masks:
                         (folder/'coverage_masks').mkdir(exist_ok=True)
                 for i, rec in enumerate(records):
+                    self._checkpoint('Saving native pixels and model tiles', i, len(records))
                     x1,y1,x2,y2 = [rec[k] for k in ('x1','y1','x2','y2')]
                     valid = owners[y1:y2,x1:x2] == rec['id']
                     if int(valid.sum()) != counts[rec['id']]:
@@ -264,10 +300,10 @@ class SmartSlicer:
                     rec['valid_pixels'] = int(valid.sum())
                     rec['canvas_shape'] = [self.target_size,self.target_size]
                     rec['native_filename'] = 'native/native_{:04d}.png'.format(rec['id'])
-                    if getattr(config,'SAVE_COVERAGE_MASKS',False):
+                    if self.save_coverage_masks:
                         rec['coverage_mask'] = 'coverage_masks/coverage_{:04d}.png'.format(rec['id'])
                     rec['transform'] = scale_metadata(y2-y1,x2-x1,self.target_size)
-                    coverage = fixed_canvas(valid.astype(np.uint8)*255,rec['transform'],mask=True) if getattr(config,'SAVE_COVERAGE_MASKS',False) else None
+                    coverage = fixed_canvas(valid.astype(np.uint8)*255,rec['transform'],mask=True) if self.save_coverage_masks else None
                     raw_crop=raw_img[y1:y2,x1:x2]
                     if raw_crop.ndim == 2 and raw_crop.dtype == np.uint8:
                         rec['quality']={'raw_fraction_ge_250':float(np.mean(raw_crop[valid]>=250))}
@@ -288,12 +324,17 @@ class SmartSlicer:
                                 guarantee='8-connected components of the supplied obstacle mask',
                                 parameters=dict(target_size=self.target_size,margin_start=self.base_step,margin_end=self.max_step,dynamic_step=self.dynamic_step,min_margin_limit=self.min_margin_limit,min_corridor_width=self.min_corridor_width,oversized_policy=self.oversized_policy),
                                 checks=checks, tiles=records)
+                if run_info is not None:
+                    manifest['run_info'] = run_info
+                self._checkpoint('Writing tile coordinates', len(records), len(records))
                 for folder in [out] + ([raw_out] if raw_out else []):
                     with open(str(folder/'overview'/(base_name+'_tiles_coords.json')),'w',encoding='utf-8') as handle:
                         json.dump(manifest,handle,indent=2)
                 print('   - Rendering ownership boundaries...',flush=True)
-                overview = render_overview(raw_img,owners,records,config.OVERVIEW_MAP_SIZE)
-                checked_imwrite(out/'overview'/(base_name+'_TILE_INDEX_MAP_{}px.png'.format(config.OVERVIEW_MAP_SIZE)),overview)
+                self._checkpoint('Rendering tile overview')
+                overview = render_overview(raw_img,owners,records,self.overview_size)
+                checked_imwrite(out/'overview'/(base_name+'_TILE_INDEX_MAP_{}px.png'.format(self.overview_size)),overview)
+                self._checkpoint('Slicing complete', len(records), len(records))
                 print('   - Validated: {} tiles, {} protected components, zero component splits.'.format(len(records),len(stats)-1),flush=True)
                 return manifest
             finally:

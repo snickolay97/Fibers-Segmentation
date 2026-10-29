@@ -1,7 +1,16 @@
-# Track only application code and this ignore policy at the repository root.
+# Application sources, tests, launchers and documentation; large data stay local.
 /*
 !/.gitignore
 !/main.py
+!/app.py
+!/launch_app.cmd
+!/launch_app.ps1
+!/requirements.txt
+!/README.md
+!/AGENTS.md
+!/docs/
+!/test/
+!/README_RU.md
 !/src/
 !/tools/
 
@@ -12,3 +21,8 @@ __pycache__/
 venv/
 .env
 .env.*
+
+# Local scientific audits, derived examples and transcripts stay on this machine.
+/docs/*
+!/docs/SOLODATA_RELEASE_2026-10-29_RU.md
+/test/Fiber Detection.py

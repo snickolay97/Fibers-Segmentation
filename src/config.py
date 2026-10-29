@@ -24,7 +24,7 @@ ANIMATION_DIR = 'data/animations'
 SAVE_RAW_TILES = False                  # Set to True only when raw tiles are required
 
 # 3. Overview Map Resolution (canonical puzzle map size in px)
-OVERVIEW_MAP_SIZE = 8000
+OVERVIEW_MAP_SIZE = 6000
 
 # ==============================================================================
 # ADAPTIVE GRID PARAMETERS (SMART SLICER)

@@ -29,7 +29,7 @@ def main():
     selected_mode = 'filter_and_slice'
 
     # Target dataset for tile exclusion mode
-    DATASET_NAME = 'FL1_G3_RGB_Red'
+    DATASET_NAME = 'FL01_G3_RGB_Red'
 
     # Ranges & IDs of tiles to isolate (outside microchannel or artifacts)
     TILES_TO_EXCLUDE = []  # Review the v2 overview: old tile IDs are no longer valid.
