@@ -79,29 +79,48 @@ class HelpCenterTests(unittest.TestCase):
         self.help.deleteLater()
         self.app.processEvents()
 
-    def row(self, key):
-        for index in range(self.help.parameter_table.rowCount()):
-            if self.help.parameter_table.item(index, 0).data(QtCore.Qt.ItemDataRole.UserRole) == key:
-                return index
-        self.fail('Parameter missing from reference: ' + key)
-
     def nav_payloads(self):
-        return [tuple(self.help.navigation.item(index).data(QtCore.Qt.ItemDataRole.UserRole))
-                for index in range(self.help.navigation.count())]
+        return list(self.help._nav_items)
 
     def test_factory_and_current_are_separate_and_refresh_is_read_only(self):
-        self.help.open_parameter('gamma')
-        row = self.row('gamma')
-        self.assertEqual(self.help.parameter_table.item(row, 1).text(), '1.2')
-        self.assertEqual(self.help.parameter_table.item(row, 2).text(), '2.4')
+        self.help.open_topic('parameters')
+        table = self.help.parameter_table
+        self.assertEqual(table.rowCount(), len(FACTORY_DEFAULTS))
+        row = next(row for row in range(table.rowCount())
+                   if table.item(row, 0).data(QtCore.Qt.ItemDataRole.UserRole) == 'gamma')
+        self.assertEqual([table.item(row, column).text() for column in (1, 2)], ['1.2', '2.4'])
+        table.selectRow(row)
+        self.assertEqual(self.help._current_parameter, 'gamma')
+        self.assertIn('Factory default\nCurrent value\n1.2\n2.4', self.help.details.toPlainText())
+        self.assertIn('Try it and check the result', self.help.details.toPlainText())
         self.assertFalse(self.help.isModal())
         supplied = {'gamma': 3.5, 'metadata': {'nested': 4}}
         self.help.refresh_settings(supplied)
         self.help.current_settings['metadata']['nested'] = 99
         self.assertEqual(supplied['metadata']['nested'], 4)
-        self.assertEqual(self.help.parameter_table.item(self.row('gamma'), 1).text(), '1.2')
-        self.assertIn('3.5', self.help.details.toPlainText())
+        self.assertEqual([table.item(row, column).text() for column in (1, 2)], ['1.2', '3.5'])
+        self.assertTrue(table.item(row, 0).isSelected())
+        self.assertIn('Factory default\nCurrent value\n1.2\n3.5', self.help.details.toPlainText())
         self.assertEqual(FACTORY_DEFAULTS['gamma'], 1.2)
+
+    def test_parameter_index_links_every_article_in_each_language(self):
+        for language, heading in (
+            ('en', 'Try it and check the result'),
+            ('ru', 'Что попробовать и как проверить результат'),
+            ('he', 'מה לנסות ואיך לבדוק את התוצאה'),
+        ):
+            self.help.retranslate(language)
+            self.help.open_topic('parameters')
+            self.assertIsNone(self.help._current_parameter)
+            index = self.help.details.toHtml()
+            for key in PARAMETER_REFERENCE:
+                with self.subTest(language=language, key=key):
+                    self.assertIn(f'href="parameter:{key}"', index)
+                    self.help._follow_link(QtCore.QUrl(f'parameter:{key}'))
+                    self.assertIn(heading, self.help.details.toPlainText())
+                    self.assertIn('href="topic:parameters"', self.help.details.toHtml())
+            self.help._follow_link(QtCore.QUrl('topic:parameters'))
+            self.assertIsNone(self.help._current_parameter)
 
     def test_browsing_and_close_never_modify_project(self):
         from src.desktop.project import Project
@@ -125,8 +144,85 @@ class HelpCenterTests(unittest.TestCase):
         self.assertIn(('topic', 'preparation'), self.nav_payloads())
         self.assertIn(('parameter', 'gamma'), self.nav_payloads())
         self.help.search.setText('no_such_help_term_123456789')
-        self.assertEqual(self.help.navigation.count(), 0)
+        self.assertEqual(self.help.navigation.topLevelItemCount(), 0)
         self.assertIn('No matching help', self.help.browser.toPlainText())
+
+    def test_model_chart_help_links_search_and_matrix_example_in_all_languages(self):
+        for language, query, precision, example in (
+            ('en', 'confusion matrix', '0.553', 'Fiber row and Particle column'),
+            ('ru', 'матрицу ошибок', '0,553', 'строку «Волокно» и столбец «Частица»'),
+            ('he', 'מטריצת הבלבול', '0.553', 'לשורת סיב ולעמודת חלקיק'),
+        ):
+            with self.subTest(language=language):
+                self.help.retranslate(language)
+                self.help.open_topic('training_charts')
+                html = self.help.browser.toHtml()
+                for topic in ('tree_impurity', 'confusion_matrix', 'permutation_importance'):
+                    self.assertIn(f'href="topic:{topic}"', html)
+                self.help._follow_link(QtCore.QUrl('topic:confusion_matrix'))
+                self.assertIn('<table', self.help.browser.toHtml())
+                text = self.help.browser.toPlainText()
+                self.assertIn('26/47', text)
+                self.assertIn(precision, text)
+                self.help.search.setText(query)
+                self.assertIn(('topic', 'confusion_matrix'), self.nav_payloads())
+                self.help.open_topic('model_fit')
+                self.assertIn('max_depth', self.help.browser.toPlainText())
+                self.help.open_topic('model_evaluation')
+                for topic in ('evaluation_gallery', 'object_prediction_review'):
+                    self.assertIn(f'href="topic:{topic}"', self.help.browser.toHtml())
+                self.help.open_topic('object_prediction_review')
+                plain = self.help.browser.toPlainText().replace('\u2066', '').replace('\u2069', '')
+                self.assertIn(example, plain)
+                self.help.open_parameter('enable_animations')
+                for axis in ('right', 'bottom'):
+                    self.assertIn(f'search_0033_{axis}', self.help.details.toPlainText())
+
+    def test_search_and_context_for_tile_editing_and_window_shifts(self):
+        for language, editor_queries, automatic in (
+            ('en', ('freehand erase', 'smaller side', 'brightness gamma', 'draw rectangle', 'pipette'), 'Automatic'),
+            ('ru', ('стереть от руки', 'меньшая сторона', 'яркость гамма', 'выделить прямоугольник', 'пипетка'), 'Автоматически'),
+            ('he', ('מחיקה ביד חופשית', 'הצד הקטן יותר', 'בהירות גאמה', 'בחירת מלבן', 'טפטפת'), 'אוטומטי'),
+        ):
+            with self.subTest(language=language):
+                self.help.retranslate(language)
+                for query in editor_queries:
+                    self.help.search.setText(query)
+                    self.assertIn(('topic', 'tile_editor'), self.nav_payloads(), query)
+                self.help.open_parameter('tile_editor')
+                self.assertEqual(self.help._current_topic, 'tile_editor')
+                from src.default_settings import EDITOR_DEFAULTS
+                self.assertIn(str(EDITOR_DEFAULTS['erase_radius']), self.help.browser.toPlainText())
+                self.assertIn('valid_mask.png', self.help.browser.toPlainText())
+                self.help.refresh_settings({'straight_shift_left': 0})
+                self.help.open_parameter('straight_shift_left')
+                table = self.help.parameter_table
+                row = table.selectedItems()[0].row()
+                self.assertEqual(table.item(row, 1).text(), automatic)
+                self.assertEqual(table.item(row, 2).text(), '0')
+                self.help.refresh_settings({'search_window_end': 1400})
+                self.help.open_parameter('search_window_end')
+                row = table.selectedItems()[0].row()
+                self.assertEqual(table.item(row, 1).text(), automatic)
+                self.assertEqual(table.item(row, 2).text(), '1400')
+                interval = '\u2066[1125, 1400)\u2069' if language == 'he' else '[1125, 1400)'
+                self.assertIn(interval, self.help.details.toPlainText())
+
+    def test_first_run_navigation_and_troubleshooting_search_in_each_language(self):
+        for language, heading, query in (
+            ('en', 'First run, step by step', 'empty dataset list'),
+            ('ru', 'Первый запуск по шагам', 'наборов пуст'),
+            ('he', 'הפעלה ראשונה, צעד אחר צעד', 'המערכים ריקה'),
+        ):
+            with self.subTest(language=language):
+                self.help.retranslate(language)
+                self.help.home_button.click()
+                self.assertIn(heading, self.help.browser.toPlainText())
+                self.assertIn('topic:segmentation', self.help.browser.toHtml())
+                self.help._follow_link(QtCore.QUrl('topic:segmentation'))
+                self.assertEqual(self.help._current_topic, 'segmentation')
+                self.help.search.setText(query)
+                self.assertIn(('topic', 'recovery'), self.nav_payloads())
 
     def test_open_parameter_routes_topics_and_local_links(self):
         self.help.search.setText('gamma')
@@ -138,6 +234,9 @@ class HelpCenterTests(unittest.TestCase):
         self.assertEqual(self.help._current_topic, 'tiles')
         self.help._follow_link(QtCore.QUrl('parameter:gamma'))
         self.assertEqual(self.help._current_parameter, 'gamma')
+        selected = self.help.parameter_table.selectedItems()
+        self.assertTrue(selected)
+        self.assertEqual(selected[0].data(QtCore.Qt.ItemDataRole.UserRole), 'gamma')
         self.help.open_topic('unknown_badge')
         self.assertEqual(self.help._current_topic, 'getting_started')
 

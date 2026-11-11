@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
+  <title>SoLoData</title>
+  <rect x="8" y="8" width="240" height="240" rx="56" fill="#15383c"/>
+  <g fill="none" stroke-linecap="round">
+    <path d="M184 67 C160 43 102 45 81 75 C57 110 100 124 139 134 C184 146 190 174 160 192 C136 208 96 204 73 183" stroke="#4ed4b6" stroke-width="21"/>
+    <path d="M180 95 C158 77 127 79 116 96 M141 165 C122 163 105 157 91 147" stroke="#ecfffa" stroke-width="10"/>
+  </g>
+  <circle cx="183" cy="186" r="13" fill="#ecfffa"/>
+</svg>

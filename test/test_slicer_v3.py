@@ -2,10 +2,65 @@ import tempfile,unittest,json
 from pathlib import Path
 import numpy as np
 import cv2
+from src.app_settings import PipelineSettings, SettingsValidationError
 from src.block2_slicer import SmartSlicer
 from src.tile_scale import scale_metadata,fixed_canvas,output_to_source,measurement_factors
 from src import config
 from src.partition_geometry import connected_components_striped
+
+
+class StraightSearchTests(unittest.TestCase):
+    def test_factory_trials_keep_original_offsets(self):
+        slicer = SmartSlicer(settings=PipelineSettings.from_dict({'target_size': 1500}))
+        self.assertEqual(slicer._straight_offsets, list(range(1125, 374, -22)))
+        self.assertEqual(slicer.straight_shift_right, 0)
+
+    def test_explicit_limits_try_exact_offsets_and_find_corridors(self):
+        for left, right, corridor, expected in ((5, 0, (145, 148), 146), (0, 5, (197, 200), 198)):
+            with self.subTest(left=left, right=right):
+                slicer = SmartSlicer(settings=PipelineSettings(target_size=200, min_corridor_width=3,
+                    straight_shift_left=left, straight_shift_right=right))
+                slicer.search_stats = dict(edge=0, corridor=0, dijkstra=0, deferred=0)
+                block = np.ones((8, 200), dtype=np.uint8)
+                block[:, corridor[0]:corridor[1]] = 0
+                np.testing.assert_array_equal(slicer._boundary(block), np.full(8, expected))
+                self.assertEqual(slicer.search_stats['corridor'], 1)
+
+    def test_manual_window_end_changes_rightward_reach(self):
+        settings = PipelineSettings(target_size=1500, search_window_end=1400,
+                                    straight_shift_left=0, straight_shift_right=100)
+        slicer = SmartSlicer(settings=settings)
+        self.assertEqual((slicer.base_step, slicer.max_step), (1125, 1400))
+        self.assertEqual(slicer._straight_offsets, [1125, 1147, 1169, 1191, 1213, 1225])
+        slicer.search_stats = dict(edge=0, corridor=0, dijkstra=0, deferred=0)
+        block = np.ones((8, 1500), dtype=np.uint8)
+        # Only the final shifted window exposes enough of this corridor.
+        block[:, 1493:] = 0
+        np.testing.assert_array_equal(slicer._boundary(block), np.full(8, 1496))
+        self.assertEqual(slicer.search_stats['corridor'], 1)
+
+    def test_manual_window_end_must_fit_the_initial_window(self):
+        for end in (1125, 1501, True, 1400.0):
+            with self.subTest(end=end), self.assertRaises(SettingsValidationError):
+                PipelineSettings(search_window_end=end).validate()
+        with self.assertRaises(SettingsValidationError):
+            PipelineSettings(search_window_end=1400, straight_shift_right=101).validate()
+
+    def test_dijkstra_keeps_the_nominal_window_after_straight_trials(self):
+        slicer = SmartSlicer(settings=PipelineSettings(target_size=200, min_corridor_width=3,
+            straight_shift_left=5, straight_shift_right=5))
+        self.assertEqual(slicer._straight_offsets, [150, 147, 153, 145, 155])
+        slicer.search_stats = dict(edge=0, corridor=0, dijkstra=0, deferred=0)
+        block = np.ones((8, 200), dtype=np.uint8)
+        block[np.arange(8), np.arange(155, 163)] = 0
+        np.testing.assert_array_equal(slicer._boundary(block), np.arange(155, 163))
+        self.assertEqual(slicer.search_stats['dijkstra'], 1)
+
+    def test_shifts_cannot_go_beyond_tile_or_minimum_offset(self):
+        for values in ({'straight_shift_left': 101}, {'straight_shift_right': 6},
+                       {'straight_shift_left': -1}, {'straight_shift_right': None}):
+            with self.subTest(values=values), self.assertRaises(SettingsValidationError):
+                PipelineSettings.from_dict({'target_size': 200, **values})
 
 
 class ScaleTests(unittest.TestCase):
@@ -44,6 +99,7 @@ class ScaleTests(unittest.TestCase):
             old=config.OVERVIEW_MAP_SIZE;config.OVERVIEW_MAP_SIZE=120
             try:r=s.slice(raw,raw,mask,'sample',out,rawout)
             finally:config.OVERVIEW_MAP_SIZE=old
+            self.assertTrue(r['parameters']['straight_shift_left_automatic'])
             rec=r['tiles'][0]
             self.assertEqual(cv2.imread(str(out/rec['filename']),0).shape,(64,64))
             np.testing.assert_array_equal(cv2.imread(str(out/rec['native_filename']),0),raw)
@@ -69,7 +125,7 @@ class ScaleTests(unittest.TestCase):
             cv2.imwrite(str(dataset/'native/native_0001.png'),native)
             cv2.imwrite(str(dataset/'sample_tile_0001.png'),np.zeros((32,32),np.uint8))
             (labels/'sample_tile_0001.txt').write_text('0 0.25 0.25 0.75 0.25 0.75 0.75 0.25 0.75\n')
-            rec=dict(filename='sample_tile_0001.png',native_filename='native/native_0001.png',transform=scale_metadata(64,64,32))
+            rec=dict(id=1,filename='sample_tile_0001.png',native_filename='native/native_0001.png',transform=scale_metadata(64,64,32))
             (dataset/'overview/sample_tiles_coords.json').write_text(json.dumps(dict(schema_version=3,tiles=[rec])))
             TopologicalFeatureExtractor(str(dataset),str(labels),str(out),'sample').execute()
             rows=pd.read_csv(str(out/'sample_features.csv'))

@@ -62,6 +62,17 @@ class WorkerProtocolTests(unittest.TestCase):
         self.assertEqual(events[-1]['status'], 'cancelled')
         self.assertEqual(Project.load(self.project.path).datasets, [])
 
+    def test_source_import_runs_in_worker_and_copies_into_project(self):
+        source = self.root / 'another_source.tif'
+        tifffile.imwrite(source, np.full((30, 40), 17, np.uint8))
+        process, events = self.run_worker({'action':'add_sources', 'paths':[str(source)]})
+        self.assertEqual(process.returncode, 0, process.stderr + process.stdout)
+        self.assertEqual(events[-1]['summary']['added'], 1)
+        loaded = Project.load(self.project.path)
+        imported = next(item for item in loaded.sources if item['original_path'] == str(source))
+        self.assertEqual(Path(imported['path']).read_bytes(), source.read_bytes())
+        self.assertIn(Path(loaded.workspace) / 'sources', Path(imported['path']).parents)
+
     def test_invalid_request_reports_error(self):
         process, events = self.run_worker({'action':'unknown'})
         self.assertEqual(process.returncode, 1)

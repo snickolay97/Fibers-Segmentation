@@ -33,6 +33,8 @@ class UsabilityTests(unittest.TestCase):
         self.window.close()
         image_pool().waitForDone(5000)
         self.app.processEvents()
+        self.window.deleteLater()
+        QtCore.QCoreApplication.sendPostedEvents(self.window, QtCore.QEvent.Type.DeferredDelete)
         self.temporary.cleanup()
 
     def pump(self, predicate, timeout=30):
@@ -112,7 +114,9 @@ class UsabilityTests(unittest.TestCase):
         self.window.detect_objects_button.click()
         self.pump(lambda: self.window.process is None)
         self.assertIsNone(self.window._job_error)
-        self.assertEqual(self.window.sidebar.currentRow(), 4)
+        self.assertEqual(self.window.sidebar.currentRow(), 3)
+        # Review segmentation first, then enter the separate labeling stage.
+        self.window.sidebar.setCurrentRow(4)
         self.assertEqual(self.window.labels_mode.currentData(), 'auto')
         gallery = self.window.object_gallery
         self.assertGreaterEqual(len(gallery.visible_rows), 6)
@@ -168,6 +172,8 @@ class UsabilityTests(unittest.TestCase):
         self.window.close()
         image_pool().waitForDone(5000)
         self.app.processEvents()
+        self.window.deleteLater()
+        QtCore.QCoreApplication.sendPostedEvents(self.window, QtCore.QEvent.Type.DeferredDelete)
         self.window = MainWindow(Project.load(project_path), preferences=self.preferences)
         self.window.show()
         self.window.sidebar.setCurrentRow(4)

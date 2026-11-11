@@ -1,3 +1,4 @@
+"""Measure thresholded object components in the prepared dataset's pixel space."""
 import os
 import json
 import glob
@@ -9,7 +10,7 @@ import warnings
 import shutil
 import tempfile
 from pathlib import Path
-from typing import Tuple, List, Optional
+from typing import Tuple, List, Optional, Union
 from skimage import measure, morphology
 import skimage.filters as ski_filters
 import scipy.ndimage as ndi
@@ -18,6 +19,9 @@ from src import config
 from src.object_classes import OBJECT_CLASS_CATALOG
 from src.partition_geometry import dataset_path, png_shape, checked_imwrite
 from src.tile_scale import scale_metadata
+from src.tile_edits import (active_tile_edits, effective_tile_record, tile_artifact_path,
+                            tile_edit_signature)
+from src.yolo_polygons import read_yolo_polygons
 
 warnings.filterwarnings("ignore")
 
@@ -29,6 +33,7 @@ FEATURE_COLUMNS = ['Large_Image', 'Tile_Name', 'Object_ID', 'Class_ID', 'Class_N
 
 
 def _tile_files(dataset_dir):
+    """Enumerate active model tiles; excluded models live in a subdirectory."""
     return sorted(p for p in Path(dataset_dir).glob('*.png')
                   if re.fullmatch(r'.+_tile_\d+\.png', p.name))
 
@@ -47,6 +52,8 @@ def inspect_labels(dataset_dir, labels_dir):
             result['missing_names'].append(label.name)
             continue
         try:
+            # Unit dimensions exercise syntax and normalized-coordinate checks
+            # without decoding the tile. Extraction scales the polygon later.
             polygons = TopologicalFeatureExtractor._parse_yolo(str(label), 1, 1)
             key = 'annotated' if polygons else 'empty'
             result[key] += 1
@@ -95,36 +102,19 @@ class TopologicalFeatureExtractor:
 
     @staticmethod
     def _parse_yolo(label_path: str, img_w: int, img_h: int) -> list:
-        objects = []
-        with open(label_path, 'r', encoding='utf-8-sig') as f:
-            for line_number, line in enumerate(f, 1):
-                parts = line.strip().split()
-                if not parts:
-                    continue
-                if len(parts) < 7 or (len(parts)-1) % 2:
-                    raise ValueError('Expected YOLO segmentation polygon (at least 3 points): '+label_path)
-                try:
-                    class_id = int(parts[0])
-                    coords = np.array(parts[1:], dtype=float).reshape(-1, 2)
-                except ValueError as error:
-                    raise ValueError('Invalid YOLO numeric values at {}:{}'.format(label_path, line_number)) from error
-                if class_id not in CLASS_MAP or class_id == -1:
-                    raise ValueError('Unknown annotation class at {}:{}'.format(label_path, line_number))
-                if not np.all(np.isfinite(coords)) or np.any(coords < 0) or np.any(coords > 1):
-                    raise ValueError('YOLO coordinates must be finite and normalized to 0..1 at {}:{}'.format(label_path, line_number))
-                coords[:, 0] *= img_w
-                coords[:, 1] *= img_h
-                contour = coords.reshape((-1, 1, 2)).astype(np.int32)
-                objects.append((class_id, contour))
-        return objects
+        """Validate each class/polygon row and scale its vertices to pixel edges."""
+        return [(class_id, (points * (img_w, img_h)).reshape(-1, 1, 2).astype(np.int32))
+                for class_id, points in read_yolo_polygons(label_path)]
 
     @staticmethod
     def _find_contours(binary_img: np.ndarray, min_area: int = 10) -> list:
+        """Use outer contours as candidate envelopes and assign unknown classes."""
         contours, _ = cv2.findContours(binary_img, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         return [(-1, c) for c in contours if cv2.contourArea(c) >= min_area]
 
     def _create_local_mask(self, contour: np.ndarray, gray_tile: np.ndarray,
-                           pad: int = 2) -> Tuple[np.ndarray, np.ndarray]:
+                           pad: int = 2, valid_mask=None) -> Tuple[np.ndarray, np.ndarray]:
+        """Threshold the intensities inside one polygon in a bounded crop."""
         x, y, w, h = cv2.boundingRect(contour)
         img_h, img_w = gray_tile.shape
 
@@ -137,9 +127,13 @@ class TopologicalFeatureExtractor:
         shifted_contour[:, 0, 0] -= x1
         shifted_contour[:, 0, 1] -= y1
         cv2.drawContours(stencil, [shifted_contour], -1, 255, thickness=-1)
+        if valid_mask is not None:
+            stencil[~valid_mask[y1:y2, x1:x2]] = 0
 
         isolated_gray = cv2.bitwise_and(raw_crop, raw_crop, mask=stencil)
 
+        # The local histogram excludes synthetic zeros outside the polygon.
+        # The factor and minimum below are project-specific cleaning rules.
         local_otsu, _ = cv2.threshold(isolated_gray[stencil > 0], 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU) if np.any(stencil > 0) else (40, 0)
         minimum = self._setting('MIN_CLEAN_THRESHOLD')
         clean_thresh = max(minimum, int(local_otsu * self._setting('TIER2_THRESHOLD_FACTOR'))) if local_otsu > 10 else minimum
@@ -150,7 +144,15 @@ class TopologicalFeatureExtractor:
         return padded_binary, padded_gray
 
     def _decompose_sub_objects(self, binary_mask: np.ndarray, gray_mask: np.ndarray,
-                              min_area: Optional[int] = None, pad: int = 2) -> List[Tuple[np.ndarray, np.ndarray]]:
+                              min_area: Optional[int] = None, pad: int = 2,
+                              with_bounds: bool = False) -> List[Union[
+                                  Tuple[np.ndarray, np.ndarray],
+                                  Tuple[np.ndarray, np.ndarray, Tuple[int, int]]]]:
+        """Extract surviving 8-connected objects with a background border.
+
+        Optional XY offsets locate that returned border in the parent mask,
+        so callers can undo both crop borders without matching image content.
+        """
         min_area = self._setting('MIN_SUB_OBJECT_AREA') if min_area is None else min_area
         bin_u8 = (binary_mask > 0).astype(np.uint8)
         num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(bin_u8, connectivity=8)
@@ -165,20 +167,24 @@ class TopologicalFeatureExtractor:
 
             sub_mask = comp_mask[by:by + bh, bx:bx + bw]
             sub_gray = cv2.bitwise_and(gray_mask[by:by + bh, bx:bx + bw], gray_mask[by:by + bh, bx:bx + bw], mask=sub_mask)
-            decomposed.append((
+            component = (
                 cv2.copyMakeBorder(sub_mask, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0),
                 cv2.copyMakeBorder(sub_gray, pad, pad, pad, pad, cv2.BORDER_CONSTANT, value=0)
-            ))
+            )
+            decomposed.append((*component, (bx - pad, by - pad)) if with_bounds else component)
 
         return decomposed
 
     @staticmethod
     def _extract_geometry(mask: np.ndarray) -> Optional[dict]:
+        """Measure area, equivalent-ellipse aspect ratio, solidity and Euler number."""
         props = measure.regionprops((mask > 0).astype(int))
         if not props:
             return None
         p = props[0]
         minor = p.minor_axis_length
+        # Preserve the finite historical fallback for a degenerate minor axis.
+        # Both axes come from second moments of the filled component.
         aspect_ratio = (p.major_axis_length / minor) if minor > 1e-6 else 1.0
         return {
             'Area': p.area,
@@ -189,11 +195,14 @@ class TopologicalFeatureExtractor:
 
     @staticmethod
     def _extract_topology(mask: np.ndarray) -> dict:
+        """Count endpoint and branch pixels using each skeleton pixel's 8-neighbours."""
         skeleton = morphology.skeletonize(mask > 0)
         kernel = np.array([[1, 1, 1], [1, 0, 1], [1, 1, 1]], dtype=int)
         neighbor_count = ndi.convolve(skeleton.astype(int), kernel, mode='constant', cval=0)
 
         endpoints = np.sum((neighbor_count == 1) & skeleton)
+        # A junction can span several pixels. The CSV feature counts the
+        # individual pixels satisfying this rule.
         branch_points = np.sum((neighbor_count > 2) & skeleton)
         return {
             'Endpoints': int(endpoints),
@@ -201,6 +210,7 @@ class TopologicalFeatureExtractor:
         }
 
     def _measurement_records(self, image_files):
+        """Check that active models can be traced to native crops and transforms."""
         base = Path(self.image_dir).resolve()
         manifests = sorted((base/'overview').glob('*_tiles_coords.json'))
         if len(manifests) > 1:
@@ -216,7 +226,9 @@ class TopologicalFeatureExtractor:
             if (base/'native').exists() or not self.allow_legacy:
                 raise ValueError('Native measurement requires a v3 manifest')
             return {}
+        # Check metadata for every model, including currently excluded tiles.
         records = {}
+        edits = active_tile_edits(base)
         for record in manifest.get('tiles', []):
             filename = record.get('filename')
             path = dataset_path(base, filename)
@@ -241,7 +253,7 @@ class TopologicalFeatureExtractor:
                 raise ValueError('Model size differs from transform: '+filename)
             if record.get('valid_mask') and png_shape(dataset_path(base,record['valid_mask'])) != shape:
                 raise ValueError('Valid mask size differs from native crop: '+filename)
-            records[filename] = record
+            records[filename] = effective_tile_record(base, record, edits)
         for image in image_files:
             if image.name not in records:
                 raise ValueError('Active tile is absent from v3 manifest: '+image.name)
@@ -274,11 +286,13 @@ class TopologicalFeatureExtractor:
             raise
 
     def execute(self):
+        """Measure active tiles and publish their CSV and matching review crops."""
         self._check_cancelled()
         base = Path(self.image_dir).resolve()
         if not base.is_dir():
             raise ValueError('Dataset directory does not exist: '+str(base))
         image_files = _tile_files(base)
+        edit_signature = tile_edit_signature(base)
         records = self._measurement_records(image_files)
         preflight = inspect_labels(base, self.labels_dir)
         if preflight['errors']:
@@ -298,6 +312,7 @@ class TopologicalFeatureExtractor:
             stage = Path(work)
             staged_masks = stage/'verification_masks'
             staged_masks.mkdir()
+            locations = dict(schema_version=1, objects=[])
             for index, img_path in enumerate(image_files):
                 self._check_cancelled()
                 label_path = Path(self.labels_dir)/(img_path.stem+'.txt')
@@ -306,15 +321,29 @@ class TopologicalFeatureExtractor:
                     self._emit(completed=index+1, total=len(image_files), tile=img_path.name, skipped=True)
                     continue
                 record = records.get(img_path.name)
-                measurement_path = dataset_path(base, record['native_filename']) if record else img_path
+                # Measurements use source-scale pixels and assume the native
+                # crop is zero outside its ownership mask, as written by the slicer.
+                measurement_path = tile_artifact_path(base, record, 'native_filename') if record else img_path
                 img = cv2.imread(str(measurement_path), cv2.IMREAD_GRAYSCALE)
                 if img is None:
                     raise ValueError('Unreadable measurement image: '+str(measurement_path))
                 img_h, img_w = img.shape
+                valid = None
+                if record and record.get('edit_reference'):
+                    mask = cv2.imread(str(tile_artifact_path(base, record, 'valid_mask')), cv2.IMREAD_GRAYSCALE)
+                    if mask is None or mask.shape != img.shape:
+                        raise ValueError('Unreadable edited tile validity mask')
+                    valid = mask > 0
+                    img[~valid] = 0
                 if label_path.is_file():
+                    # YOLO vertices are normalized to the square model canvas.
+                    # Scaling by the padded native side undoes model reduction;
+                    # the native image bounds then clip padding during masking.
                     side = record['transform']['padded_native_shape'][0] if record else None
                     objects = self._parse_yolo(str(label_path), side or img_w, side or img_h)
                 else:
+                    # Automatic detection creates coarse envelopes. Local
+                    # thresholding still determines the final measured pixels.
                     _, envelope = cv2.threshold(img, self._setting('MIN_CLEAN_THRESHOLD'), 255, cv2.THRESH_BINARY)
                     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3,3))
                     objects = self._find_contours(cv2.morphologyEx(envelope, cv2.MORPH_CLOSE, kernel), min_area=0)
@@ -324,8 +353,8 @@ class TopologicalFeatureExtractor:
                     x,y,w,h = cv2.boundingRect(contour)
                     if x >= img_w or y >= img_h or x+w <= 0 or y+h <= 0:
                         continue
-                    binary, gray = self._create_local_mask(contour, img)
-                    for sub_binary, sub_gray in self._decompose_sub_objects(binary, gray):
+                    binary, gray = self._create_local_mask(contour, img, valid_mask=valid)
+                    for sub_binary, sub_gray, offset in self._decompose_sub_objects(binary, gray, with_bounds=True):
                         self._check_cancelled()
                         geometry = self._extract_geometry(sub_binary)
                         if not geometry:
@@ -336,18 +365,33 @@ class TopologicalFeatureExtractor:
                         tile_dir.mkdir(exist_ok=True)
                         mask_path = tile_dir/'obj_{:03d}_{}.png'.format(saved_obj_idx, class_name)
                         checked_imwrite(mask_path, sub_gray if self.mask_save_mode == 'gray_3filter' else sub_binary)
+                        # Coordinates undo the local crop's 2-pixel border and
+                        # the component crop's border. Keep the exact mask,
+                        # including holes, in the same atomic review bundle.
+                        location_mask = Path('object_locations')/img_path.stem/f'obj_{saved_obj_idx:03d}.png'
+                        (staged_masks/location_mask).parent.mkdir(parents=True, exist_ok=True)
+                        checked_imwrite(staged_masks/location_mask, sub_binary)
+                        locations['objects'].append(dict(tile_name=img_path.stem, object_id=saved_obj_idx,
+                            origin_xy=[max(0, x) - 2 + offset[0], max(0, y) - 2 + offset[1]],
+                            tile_shape=[img_h, img_w], mask=location_mask.as_posix(),
+                            measurement_space='source_pixels' if record else 'tile_pixels'))
                         row = dict(Large_Image=self.large_image_name, Tile_Name=img_path.stem,
                                    Object_ID=saved_obj_idx, Class_ID=class_id, Class_Name=class_name,
                                    Measurement_Space='source_pixels' if record else 'tile_pixels',
                                    Source_Pixels_Per_Output_Pixel=record['transform']['source_pixels_per_output_pixel'] if record else 1.0,
                                    **geometry, **self._extract_topology(sub_binary))
                         if pixel_size is not None:
+                            # An isotropic length calibration contributes once
+                            # per axis to the area of each foreground pixel.
                             row['Area_um2'] = row['Area']*pixel_size*pixel_size
                         all_features.append(row)
                 self._emit(completed=index+1, total=len(image_files), tile=img_path.name, objects=len(all_features))
             staged_csv = stage/'features.csv'
+            (staged_masks/'object_locations.json').write_text(json.dumps(locations, indent=2), encoding='utf-8')
             pd.DataFrame(all_features, columns=columns).to_csv(staged_csv, index=False)
             self._check_cancelled()
+            if tile_edit_signature(base) != edit_signature:
+                raise ValueError('Tile edits changed during measurement. Recalculate the features.')
             self._publish(stage, staged_csv, staged_masks, csv_path)
         return dict(status='completed', objects=len(all_features), csv_path=str(csv_path),
                     tiles=len(image_files), skipped_unlabeled=skipped,

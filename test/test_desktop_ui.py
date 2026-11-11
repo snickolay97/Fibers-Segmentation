@@ -36,7 +36,7 @@ class DesktopTests(unittest.TestCase):
 
     def tearDown(self):
         if self.window.process is not None:
-            # No production entry point is launched by these tests.
+            # Stop any worker before removing the project's temporary directory.
             self.window.process.kill()
             self.window.process.waitForFinished(5000)
             self.app.processEvents()
@@ -68,7 +68,8 @@ class DesktopTests(unittest.TestCase):
 
     def test_empty_project_and_settings_are_valid_without_processing(self):
         from src.app_settings import PipelineSettings
-        self.assertEqual(self.window.pages.count(), 5)
+        self.assertEqual(self.window.pages.count(), 7)
+        self.assertIs(self.window.pages.widget(5), self.window.model_evaluation)
         self.assertEqual(self.window.source_table.rowCount(), 0)
         self.assertEqual(self.window.dataset_combo.count(), 0)
         self.assertIn("Выберите набор", self.window.results_summary.text())
@@ -76,6 +77,7 @@ class DesktopTests(unittest.TestCase):
         values = self.window.collect_settings()
         self.assertIsNone(values["pixel_size_um"])
         self.assertEqual(PipelineSettings.from_dict(values).target_size, 1500)
+        self.window.calibration_mode_combo.setCurrentIndex(self.window.calibration_mode_combo.findData('manual'))
         self.window._settings_fields["pixel_size_um"].setValue(.42)
         self.window.save_project()
         from src.desktop.project import Project
@@ -91,6 +93,28 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(request["source_ids"], [source["id"]])
         self.assertEqual(request["settings"]["channel"], 0)
         self.assertEqual(request["settings"]["plane"], 0)
+
+    def test_open_project_starts_at_projects_and_cancel_keeps_default_open(self):
+        from src.desktop.project import Project
+        default = Project.create(self.folder / 'projects' / 'default' / 'project.json')
+        self.window._switch_project(default)
+        saved = Path(default.path).read_bytes()
+        with patch.object(QtWidgets.QFileDialog, 'getOpenFileName', return_value=('', '')) as dialog:
+            self.window.open_project()
+        expected = Path(__file__).resolve().parents[1] / 'data' / 'projects'
+        self.assertEqual(Path(dialog.call_args.args[2]), expected)
+        self.assertEqual(self.window.project.path, default.path)
+        self.assertEqual(Path(default.path).read_bytes(), saved)
+
+    def test_open_project_can_load_a_project_outside_default_directory(self):
+        from src.desktop.project import Project
+        selected = Project.create(self.folder / 'external' / 'Study B' / 'project.json', 'Study B')
+        original = self.window.project.path
+        with patch.object(QtWidgets.QFileDialog, 'getOpenFileName', return_value=(selected.path, '')):
+            self.window.open_project()
+        self.assertEqual(self.window.project.path, selected.path)
+        self.assertEqual(self.window.project.name, 'Study B')
+        self.assertTrue(Path(original).is_file())
 
     def test_progress_error_and_no_result_do_not_report_success(self):
         self.window.handle_worker_event({"type": "progress", "stage": "features", "completed": 2, "total": 4})

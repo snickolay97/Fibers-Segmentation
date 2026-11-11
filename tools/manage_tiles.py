@@ -10,7 +10,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from src.tile_manager import TileManager
 
 TARGET_DATASET = 'FL01_G3_RGB_Red'
-TILES_TO_EXCLUDE = []  # Review the v2 overview: old tile IDs are no longer valid.
+# Resolve IDs from the overview for this exact dataset. A fresh preparation
+# can assign different IDs even when it uses the same source TIFF.
+TILES_TO_EXCLUDE = []
 
 if __name__ == "__main__":
     manager = TileManager()

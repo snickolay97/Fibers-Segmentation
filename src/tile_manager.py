@@ -1,3 +1,4 @@
+"""Move model tile files between active and excluded dataset locations."""
 import os
 import shutil
 import re
@@ -31,6 +32,7 @@ class TileManager:
 
     @staticmethod
     def parse_specs(specs: Union[List[Union[int, str]], str, int]) -> Set[int]:
+        """Expand IDs, comma-separated lists and inclusive ranges into a set."""
         if isinstance(specs, (str, int)):
             specs = [specs]
 
@@ -67,6 +69,7 @@ class TileManager:
 
     @staticmethod
     def _filenames(base, dataset_name):
+        """Resolve stable IDs from the manifest or legacy filenames."""
         manifests = sorted((base/'overview').glob('*_tiles_coords.json'))
         if len(manifests) > 1:
             raise ValueError('Multiple dataset manifests found')
@@ -88,7 +91,8 @@ class TileManager:
                         result[int(match.group(1))] = path.name
         return result
 
-    def _move(self, dataset_name, tile_specs, restore):
+    def _move(self, dataset_name, tile_specs, restore, state=None):
+        """Plan the batch first and roll back completed renames on failure."""
         ids = self.parse_specs(tile_specs)
         base = self._dataset(self.output_dir, dataset_name)
         if not base.is_dir() or not ids:
@@ -99,6 +103,8 @@ class TileManager:
             raw = self._dataset(self.raw_output_dir, dataset_name)
             if raw.is_dir() and raw != base:
                 roots.append(raw)
+        # Move models only. Native crops and validity masks remain at the
+        # stable paths referenced by the manifest.
         planned = []
         moved_count = 0
         for ident in sorted(ids):
@@ -125,8 +131,30 @@ class TileManager:
                 # Both locations are inside the same checked dataset directory.
                 source.rename(destination)
                 completed.append((source, destination))
+            from src.black_tiles import exclusion_state, save_exclusion_state, pixel_revision
+            from src.tile_edits import effective_tile_record
+            if state is None:
+                state = exclusion_state(base)
+                manifests = sorted((base/'overview').glob('*_tiles_coords.json'))
+                records = read_manifest(manifests[0])['tiles'] if manifests else []
+                for record in records:
+                    if record['id'] in ids:
+                        effective = effective_tile_record(base,record)
+                        state['tiles'][str(record['id'])] = dict(
+                            kind='restored' if restore else 'manual',revision=pixel_revision(base,effective))
+            save_exclusion_state(base,state)
         except BaseException:
             for source, destination in reversed(completed):
                 destination.rename(source)
             raise
         return moved_count
+
+    def exclude_black(self, dataset_name, progress=None, cancelled=None):
+        """Exclude exact-zero native tiles while retaining their bytes and IDs."""
+        from src.black_tiles import inspect_black_tiles, save_exclusion_state
+        base = self._dataset(self.output_dir,dataset_name)
+        ids,state = inspect_black_tiles(base,progress,cancelled)
+        count = self._move(dataset_name,ids,restore=False,state=state) if ids else 0
+        if not ids:
+            save_exclusion_state(base,state)
+        return dict(count=count,tile_ids=ids)

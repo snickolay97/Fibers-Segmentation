@@ -97,7 +97,10 @@ class ImageFullscreenTests(unittest.TestCase):
             self.app.processEvents()
             dialog = self.viewer._fullscreen_dialog
             self.assertIsNotNone(dialog)
-            self.assertTrue(dialog.isFullScreen())
+            self.assertFalse(dialog.isFullScreen())
+            self.assertTrue(dialog.windowFlags() & QtCore.Qt.WindowType.WindowTitleHint)
+            self.assertTrue(dialog.findChild(QtWidgets.QToolButton, 'imageRuler').isEnabled())
+            self.assertTrue(dialog.findChild(QtWidgets.QToolButton, 'imageContour').isEnabled())
             self.assertIs(dialog.view.scene(), original_scene)
             self.assertIs(self.viewer.view.scene(), original_scene)
             self.assertIs(self.viewer._pixmap_item, original_item)
@@ -206,8 +209,8 @@ class ImageFullscreenTests(unittest.TestCase):
         self.viewer.open_fullscreen()
         self.viewer.retranslate('ru')
         self.assertIsNone(self.viewer._fullscreen_dialog)
-        self.assertEqual(self.viewer.fullscreen_button.accessibleName(), 'Во весь экран')
-        self.assertEqual(self.viewer.open_fullscreen().exit_button.text(), 'Выйти из полного экрана · Esc')
+        self.assertEqual(self.viewer.fullscreen_button.accessibleName(), 'Открыть изображение в окне…')
+        self.assertEqual(self.viewer.open_fullscreen().exit_button.text(), 'Закрыть · Esc')
         self.viewer.hide()
         self.assertIsNone(self.viewer._fullscreen_dialog)
         self.viewer.show()
@@ -259,6 +262,92 @@ class ImageFullscreenTests(unittest.TestCase):
         self.viewer.clear()
         QtTest.QTest.qWait(self.app.doubleClickInterval() + 20)
         self.assertEqual(clicks, [])
+
+    def test_fit_hides_scrollbars_and_zoomed_image_pans_on_both_axes(self):
+        self.load_image()
+        for view in (self.viewer.view, self.viewer.open_fullscreen().view):
+            self.app.processEvents()
+            QtTest.QTest.qWait(30)
+            self.assertFalse(view.horizontalScrollBar().isVisible())
+            self.assertFalse(view.verticalScrollBar().isVisible())
+            self.viewer._zoom_view(view, 4)
+            self.app.processEvents()
+            self.assertTrue(view.horizontalScrollBar().isVisible())
+            self.assertTrue(view.verticalScrollBar().isVisible())
+            view.centerOn(self.viewer._pixmap_item.boundingRect().center())
+            for delta, bar in ((QtCore.QPoint(0, 35), view.verticalScrollBar()),
+                               (QtCore.QPoint(45, 0), view.horizontalScrollBar())):
+                before = bar.value()
+                point = view.viewport().rect().center()
+                QtTest.QTest.mousePress(view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=point)
+                QtTest.QTest.mouseMove(view.viewport(), point + delta, 20)
+                QtTest.QTest.mouseRelease(view.viewport(), QtCore.Qt.MouseButton.LeftButton, pos=point + delta)
+                self.assertNotEqual(bar.value(), before, 'Zoomed images must pan in both directions')
+
+    def test_middle_mouse_pans_in_each_view_with_measurement_tools_active(self):
+        self.load_image()
+        click_positions = []
+        self.viewer.clicked.connect(lambda x, y: click_positions.append((x, y)))
+        embedded = self.viewer.view
+        self.viewer._zoom_view(embedded, 4)
+        dialog = self.viewer.open_enlarged()
+        self.app.processEvents()
+        self.viewer._zoom_view(dialog.view, 4)
+        button = QtCore.Qt.MouseButton.MiddleButton
+        left = QtCore.Qt.MouseButton.LeftButton
+        for view, other, tool in ((embedded, dialog.view, self.viewer.polygon),
+                                  (dialog.view, embedded, self.viewer.ruler)):
+            view.centerOn(self.viewer._pixmap_item.boundingRect().center())
+            bars = view.horizontalScrollBar(), view.verticalScrollBar()
+            other_bars = other.horizontalScrollBar(), other.verticalScrollBar()
+            tool.set_active(True)
+            viewport = view.viewport()
+            QtTest.QTest.mouseClick(viewport, left, pos=viewport.rect().center())
+            self.app.processEvents()
+            before = [bar.value() for bar in bars]
+            other_before = [bar.value() for bar in other_bars]
+            origin = viewport.rect().center()
+            point = origin + QtCore.QPoint(40, 30)
+            QtTest.QTest.mousePress(viewport, button, pos=origin)
+            self.assertEqual(viewport.cursor().shape(), QtCore.Qt.CursorShape.ClosedHandCursor)
+            QtTest.QTest.mouseMove(viewport, point, 20)
+            QtTest.QTest.mouseRelease(viewport, button, pos=point)
+            self.assertEqual([bar.value() for bar in bars], [before[0] - 40, before[1] - 30])
+            self.assertEqual([bar.value() for bar in other_bars], other_before)
+            self.assertNotEqual(viewport.cursor().shape(), QtCore.Qt.CursorShape.ClosedHandCursor)
+            self.assertTrue(tool.active)
+            if tool is self.viewer.polygon:
+                self.assertEqual(len(tool.points), 1)
+            else:
+                self.assertEqual(tool.start, tool.end)
+        self.assertFalse(click_positions)
+
+    def test_original_window_decodes_saved_pixels_and_preserves_preview(self):
+        self.load_image()
+        self.viewer.set_polygons([{'class_id': 2, 'points': [(.1, .1), (.8, .1), (.8, .9)]}])
+        preview_item = self.viewer._pixmap_item
+        dialog = self.viewer.open_original()
+        try:
+            self.pump_until(lambda: dialog.viewer.original_size == (3200, 1600))
+            native = dialog.viewer
+            self.assertEqual(native._pixmap_item.pixmap().size(), QtCore.QSize(3200, 1600))
+            self.assertEqual(preview_item.pixmap().width(), 2400)
+            self.assertIs(self.viewer._pixmap_item, preview_item)
+            self.assertEqual(len(native._overlay_items), 1)
+            native.original_button.click()
+            self.assertEqual(native.view.transform().m11(), 1.0)
+            self.assertEqual(native._pixmap_item.pixmap().toImage().pixelColor(100, 100).red(), 100)
+        finally:
+            dialog.close()
+            self.flush_deletes()
+
+    def test_very_large_original_is_opened_externally_without_full_decode(self):
+        self.load_image()
+        with patch('src.desktop.widgets.MAX_NATIVE_VIEW_PIXELS', 100), \
+             patch('src.desktop.widgets.QtGui.QDesktopServices.openUrl', return_value=True) as open_url, \
+             patch('src.desktop.widgets._ImageTask', side_effect=AssertionError('No full native decode')):
+            self.assertIsNone(self.viewer.open_original())
+            self.assertEqual(Path(open_url.call_args.args[0].toLocalFile()), self.filename)
 
     def test_image_loaded_on_hidden_tab_fits_when_shown_and_resized(self):
         tabs = QtWidgets.QTabWidget()

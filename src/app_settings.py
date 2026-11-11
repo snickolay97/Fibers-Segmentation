@@ -2,7 +2,7 @@
 from dataclasses import asdict, dataclass
 from collections.abc import Mapping
 import math
-from src.default_settings import FACTORY_DEFAULTS, factory_defaults
+from src.default_settings import FACTORY_DEFAULTS, STRAIGHT_SHIFT_FIELDS, factory_defaults
 
 
 class PipelineCancelled(RuntimeError):
@@ -14,6 +14,32 @@ class SettingsValidationError(ValueError):
     def __init__(self, issues):
         self.issues = issues
         super().__init__('; '.join(issue['message'] for issue in issues))
+
+
+def search_window_end_range(target_size):
+    """A manual exclusive end leaves at least one column in the initial window."""
+    return target_size * 75 // 100 + 1, target_size
+
+
+def _tiling_margins(target_size, search_window_end=None):
+    """Resolve the initial half-open window in source pixels from the crop origin."""
+    return dict(margin_start=search_window_end_range(target_size)[0] - 1,
+                margin_end=target_size * 975 // 1000 if search_window_end is None else search_window_end,
+                dynamic_step=max(1, target_size * 15 // 1000),
+                min_margin_limit=max(1, target_size // 4))
+
+
+def straight_shift_limits(target_size, search_window_end=None):
+    """Return the allowed shifts in source pixels.
+
+    Use the automatic end for an invalid draft so the UI can still show limits.
+    """
+    low, high = search_window_end_range(target_size)
+    if type(search_window_end) is not int or not low <= search_window_end <= high:
+        search_window_end = None
+    margins = _tiling_margins(target_size, search_window_end)
+    return dict(straight_shift_left=margins['margin_start'] - margins['min_margin_limit'],
+                straight_shift_right=target_size - margins['margin_end'])
 
 
 def inspect_settings(values):
@@ -31,11 +57,16 @@ def inspect_settings(values):
     integer_fields = {'target_size', 'overview_size', 'channel', 'plane', 'bilateral_d',
                       'tophat_radius', 'bridge_kernel_size', 'buffer_kernel_size',
                       'min_clean_threshold', 'min_sub_object_area', 'min_corridor_width',
-                      'animation_max_trial_frames'}
+                      'animation_max_trial_frames', 'search_window_end', *STRAIGHT_SHIFT_FIELDS}
     positive_integers = {'overview_size', 'bilateral_d', 'tophat_radius',
                          'min_sub_object_area', 'min_corridor_width', 'animation_max_trial_frames'}
     positive_numbers = {'bilateral_sigma_color', 'bilateral_sigma_space', 'gamma',
                         'otsu_safety_factor', 'tier2_threshold_factor', 'seam_repulsion_power'}
+    target_size = values.get('target_size', FACTORY_DEFAULTS['target_size'])
+    if not isinstance(target_size, int) or target_size < 8:
+        target_size = FACTORY_DEFAULTS['target_size']
+    end_range = search_window_end_range(target_size)
+    shift_limits = straight_shift_limits(target_size, values.get('search_window_end'))
     def add(name, code, rule):
         issues.append(dict(field=name, code=code, message=str(name)+' '+rule,
                            value=values[name], default=FACTORY_DEFAULTS.get(name)))
@@ -50,10 +81,16 @@ def inspect_settings(values):
             if not isinstance(value, bool):
                 add(name, 'boolean', 'must be boolean')
         elif name in integer_fields:
+            if name in ('straight_shift_left', 'search_window_end') and value is None:
+                continue
             if isinstance(value, bool) or not isinstance(value, int):
                 add(name, 'integer', 'must be an integer')
             elif name == 'target_size' and value < 8:
                 add(name, 'minimum', 'must be at least 8 pixels')
+            elif name == 'search_window_end' and not end_range[0] <= value <= end_range[1]:
+                add(name, 'range', f'must be between {end_range[0]} and {end_range[1]} source pixels')
+            elif name in shift_limits and not 0 <= value <= shift_limits[name]:
+                add(name, 'range', f'must be between 0 and {shift_limits[name]} source pixels')
             elif name in positive_integers and value <= 0:
                 add(name, 'positive', 'must be positive')
             elif name in ('bridge_kernel_size', 'buffer_kernel_size') and (value <= 0 or value % 2 == 0):
@@ -107,6 +144,9 @@ class PipelineSettings:
     enable_gamma: bool = FACTORY_DEFAULTS['enable_gamma']
     enable_closing: bool = FACTORY_DEFAULTS['enable_closing']
     enable_dilation: bool = FACTORY_DEFAULTS['enable_dilation']
+    straight_shift_left: int | None = FACTORY_DEFAULTS['straight_shift_left']
+    straight_shift_right: int = FACTORY_DEFAULTS['straight_shift_right']
+    search_window_end: int | None = FACTORY_DEFAULTS['search_window_end']
 
     @classmethod
     def from_dict(cls, values):
@@ -121,10 +161,7 @@ class PipelineSettings:
         return asdict(self)
 
     def margins(self):
-        return dict(margin_start=int(self.target_size * .75),
-                    margin_end=int(self.target_size * .975),
-                    dynamic_step=max(1, int(self.target_size * .015)),
-                    min_margin_limit=max(1, int(self.target_size * .25)))
+        return _tiling_margins(self.target_size, self.search_window_end)
 
     def validate(self):
         issues = self.validation_issues()

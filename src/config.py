@@ -1,71 +1,58 @@
-"""
-Configuration File
-Stores all constants, magic numbers, and default paths for the pipeline.
+"""Pipeline paths, low-level fallbacks and historical experiment constants.
+
+The application uses the immutable catalogue in default_settings.py to create
+PipelineSettings. These constants also support direct calls to older helpers.
 """
 import os
 
-# Directory Paths
+# Standalone pipeline directories, relative to the working directory.
 INPUT_DIR = 'data/1_raw_large_images'
 OUTPUT_DIR = 'data/2_sliced_tiles_1500'
 RAW_OUTPUT_DIR = 'data/3_raw_sliced_tiles_1500'
 
-# Block 3 & ML Paths
-LABELS_DIR = 'data/3_sam_labels'        # Place .txt annotation files from CVAT/SAM here
-FEATURES_DIR = 'data/4_final_results'   # The final CSV/Excel files will be saved here
+LABELS_DIR = 'data/3_sam_labels'
+FEATURES_DIR = 'data/4_final_results'
 
-# ==============================================================================
-# PERFORMANCE & VISUALIZATION TOGGLES
-# ==============================================================================
-# 1. Animations Toggle (generates step-by-step GIF for each seam pathfinding)
-ENABLE_ANIMATIONS = False               # Actual search-window trials and accepted route reveal
+# Optional outputs for inspection. GIFs show attempted windows and the final route.
+ENABLE_ANIMATIONS = False
 ANIMATION_DIR = 'data/animations'
 
-# 2. Raw Tiles Toggle (saves un-filtered raw tiles mapped to the exact same seams)
-SAVE_RAW_TILES = False                  # Set to True only when raw tiles are required
-
-# 3. Overview Map Resolution (canonical puzzle map size in px)
+# Raw tiles share the same ownership masks as filtered tiles.
+SAVE_RAW_TILES = False
 OVERVIEW_MAP_SIZE = 6000
 
-# ==============================================================================
-# ADAPTIVE GRID PARAMETERS (SMART SLICER)
-# ==============================================================================
-TARGET_SIZE = 1500                      # Every model tile is this square size; native crops retained
-OVERSIZED_OBJECT_POLICY = 'preserve'    # 'preserve' larger canvases, or 'error' before exporting
-MARGIN_START = int(TARGET_SIZE * 0.75)                     # Where seam search window begins relative to anchor
-MARGIN_END = int(TARGET_SIZE * 0.975)                       # Maximum boundary coordinate where seam search window ends
+# Legacy slicer defaults. Offsets are in source pixels from the crop origin.
+TARGET_SIZE = 1500
+# Preserve oversized native crops and scale them to the fixed model canvas.
+OVERSIZED_OBJECT_POLICY = 'preserve'
+MARGIN_START = int(TARGET_SIZE * 0.75)
+MARGIN_END = int(TARGET_SIZE * 0.975)
+DYNAMIC_EXPANSION_STEP = max(1, int(TARGET_SIZE * 0.015))
+MIN_MARGIN_LIMIT = max(1, int(TARGET_SIZE * 0.25))
+MIN_CORRIDOR_WIDTH = 15  # Preferred free run before trying the narrower fallback.
 
-# Dynamic Back-off Parameters (If obstacles block corridor/seam, step window backwards)
-DYNAMIC_EXPANSION_STEP = max(1, int(TARGET_SIZE * 0.015))             # Step size in pixels when backing off
-MIN_MARGIN_LIMIT = max(1, int(TARGET_SIZE * 0.25))                  # Minimum offset in the straight-corridor search
-MIN_CORRIDOR_WIDTH = 15                 # Minimum zero-intensity run for an obstacle-free straight cut
+SEAM_REPULSION_POWER = 1.5  # Exponent in the cost based on distance to the mask.
+SEAM_OBSTACLE_PENALTY = float('inf')  # Historical constant. The solver assigns infinity directly.
 
-# Dijkstra Algorithm Parameters
-SEAM_REPULSION_POWER = 1.5              # Repulsion gradient steepness from fiber boundaries
-SEAM_OBSTACLE_PENALTY = float('inf')    # Obstacles are forbidden in the v2 path solver
-
-# ==============================================================================
-# GLOBAL PREPROCESSOR (BLOCK 1)
-# ==============================================================================
+# Grayscale preprocessing.
 BILATERAL_D = 9
-BILATERAL_SIGMA_COLOR = 45              # Stitches fluctuating faint boundaries
-BILATERAL_SIGMA_SPACE = 15              # Preserves continuity along fiber axes
+BILATERAL_SIGMA_COLOR = 45              # Intensity difference in the bilateral weight
+BILATERAL_SIGMA_SPACE = 15              # Spatial distance in the bilateral weight
 TOPHAT_RADIUS = 85                      # Background subtraction kernel radius (2R + 1 = 171 px)
-GAMMA_VALUE = 1.2                       # Contrast enhancement: lifts dim cylindrical walls
+GAMMA_VALUE = 1.2                       # Reciprocal exponent lifts dim signal and background
 
-# Safety Thresholding Factor for Obstacle Detection
-OTSU_SAFETY_FACTOR = 0.25               # 25% of Otsu baseline captures faint loops and bridges
+OTSU_SAFETY_FACTOR = 0.25  # Multiplier for the protective threshold.
 
-# ==============================================================================
-# OBJECT EXTRACTION & TOPOLOGY (BLOCK 3)
-# ==============================================================================
+# Local measurement masks.
 TIER2_THRESHOLD_FACTOR = 0.70           # Multiplier for local Otsu inside Block 3 crops
 MIN_CLEAN_THRESHOLD = 25                # Absolute minimum intensity cutoff
 MIN_SUB_OBJECT_AREA = 30                # Minimum pixel area for sub-entities
 
+# Historical experimental settings. Block 3 currently uses local thresholding
+# and connected components, without selecting any of these algorithms.
 SEPARATION_STRATEGY = 'architectural'   # 'architectural' or 'algorithmic'
 ALGORITHMIC_METHOD = 'hybrid'           # 'frangi', 'skeleton_collinearity', or 'hybrid'
 
-# Algorithmic Filters Parameters
 FRANGI_SIGMAS = (1.0, 4.0, 1.0)
 FRANGI_BETA = 0.5
 FRANGI_SENSITIVITY = 0.12
@@ -73,9 +60,9 @@ GRAPH_COLLINEARITY_COS_THRESH = -0.65
 GRAPH_BRANCH_PROBE_DIST = 8
 BRIDGE_MAX_INTENSITY_RATIO = 0.65
 
-# Auxiliary output: only enable model coverage PNGs when a trainer consumes them.
+# Model coverage PNGs store fractional coverage after resizing.
 SAVE_COVERAGE_MASKS = False
-ANIMATION_MAX_TRIAL_FRAMES = 24
+ANIMATION_MAX_TRIAL_FRAMES = 24  # Display limit. The trial log retains all windows.
 # Protective morphology, independent of the image display filters.
 BRIDGE_KERNEL_SIZE = 17
 BUFFER_KERNEL_SIZE = 5

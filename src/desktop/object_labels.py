@@ -1,9 +1,8 @@
 """Manual object targets scoped to one immutable measurement version.
 
-YOLO Class_ID/Class_Name and measured features remain untouched. Training
-exports retain source classes as metadata; they are never RF predictors.
-RF_PREDICTORS lists numeric inputs; Manual_Class_ID is the supervised target.
-Area_um2 is available when calibrated. No model is trained.
+Training exports pair numeric features with the reviewed Manual_Class_ID.
+The original YOLO Class_ID and Class_Name serve as provenance metadata.
+Calibrated measurements also include Area_um2.
 """
 import csv
 import hashlib
@@ -32,6 +31,7 @@ LABELS_FILENAME = 'manual_object_labels.json'
 
 
 def object_key(tile_name, object_id):
+    """Return the local identity shared by the CSV, gallery and label sidecar."""
     if not isinstance(tile_name, str) or not tile_name or any(c in tile_name for c in '/\\:') or tile_name in ('.','..'):
         raise ValueError(tr('Invalid object tile name'))
     if isinstance(object_id, bool):
@@ -46,6 +46,7 @@ def object_key(tile_name, object_id):
 
 
 def _measurement(dataset):
+    """Index an immutable feature table and bind labels to its byte digest."""
     dataset_id, signature = dataset.get('id'), dataset.get('measurement_signature')
     if not isinstance(dataset_id, str) or not dataset_id or not isinstance(signature, str) or not signature:
         raise ValueError(tr('Object classification requires a saved measurement version'))
@@ -135,6 +136,7 @@ def load_object_labels(dataset, current=True):
 
 
 def save_object_class(dataset, tile_name, object_id, class_key):
+    """Persist one assignment atomically, using None to clear the target."""
     if class_key is not None and (not isinstance(class_key,str) or class_key not in CLASS_BY_KEY):
         raise ValueError(tr('Unknown manual object class'))
     output, source, fields, rows, indexed, identity = _measurement(dataset)
@@ -189,6 +191,7 @@ def validate_export_destination(dataset, destination, allow_current_source=False
 
 
 def write_training_csv(dataset, destination, only_labeled=True):
+    """Export reviewed targets and numeric features with their source references."""
     output, source, fields, rows, indexed, identity = _measurement(dataset)
     document = _load_document(output, indexed, identity)
     target = validate_export_destination(dataset, destination)
@@ -222,6 +225,8 @@ def write_training_csv(dataset, destination, only_labeled=True):
     target.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
+        # Stage on the output filesystem so a failed export leaves the
+        # previous destination intact and replacement is atomic.
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', newline='',
                                          prefix='.training_', suffix='.csv', dir=target.parent, delete=False) as handle:
             temporary = Path(handle.name)

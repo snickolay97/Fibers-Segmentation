@@ -1,0 +1,37 @@
+"""Shared terminology for segmentation correction and the final analysis page."""
+from .i18n import register_translations
+
+TEXT = {
+    'Object labeling': ('Разметка объектов', 'תיוג אובייקטים'),
+    'Tile objects': ('Объекты на тайле', 'אובייקטים באריח'),
+    'Measured objects': ('Измеренные объекты', 'אובייקטים שנמדדו'),
+    'Charts': ('Графики', 'תרשימים'),
+    'Select a tile': ('Выберите тайл', 'בחרו אריח'),
+    'Select parts on the image or check them in the list.': ('Выберите части на изображении или отметьте их в списке.', 'בחרו חלקים בתמונה או סמנו אותם ברשימה.'),
+    'Merge selected parts': ('Объединить выбранные части', 'איחוד החלקים שנבחרו'),
+    'Undo last merge': ('Отменить последнее объединение', 'ביטול האיחוד האחרון'),
+    'Clear selection': ('Снять выбор', 'ניקוי הבחירה'),
+    'Show object IDs': ('Показать номера объектов', 'הצגת מספרי אובייקטים'),
+    'Selected parts: {count}': ('Выбрано частей: {count}', 'חלקים שנבחרו: {count}'),
+    'Loading object masks…': ('Загрузка масок объектов…', 'טעינת מסכות אובייקטים…'),
+    'Recalculate measurements to view exact masks and merge parts.': ('Пересчитайте измерения для просмотра точных масок и объединения частей.', 'חשבו מחדש את המדידות להצגת מסכות מדויקות ולאיחוד חלקים.'),
+    'No measured objects on this tile.': ('На этом тайле нет измеренных объектов.', 'אין אובייקטים שנמדדו באריח זה.'),
+    'The selected parts become one object using their mask union. Gaps remain unchanged.': ('Выбранные части станут одним объектом с общей маской. Промежутки сохраняются.', 'החלקים שנבחרו הופכים לאובייקט אחד לפי איחוד המסכות. הרווחים נשארים ללא שינוי.'),
+    'Merge at least two objects from one tile.': ('Выберите минимум два объекта одного тайла.', 'בחרו לפחות שני אובייקטים מאריח אחד.'),
+    'Measurements changed. Reload the tile before merging.': ('Измерения изменились. Обновите тайл перед объединением.', 'המדידות השתנו. טענו מחדש את האריח לפני האיחוד.'),
+    'Exact object masks are unavailable or inconsistent. Recalculate measurements.': ('Точные маски объектов отсутствуют или не согласованы. Пересчитайте измерения.', 'מסכות האובייקטים המדויקות חסרות או אינן עקביות. חשבו מחדש את המדידות.'),
+    'Merged object #{id}. Review its type on Object labeling.': ('Создан объект №{id}. Проверьте его тип в «Разметке объектов».', 'נוצר אובייקט מס׳ {id}. בדקו את סוגו בתיוג אובייקטים.'),
+    'No previous merge to undo.': ('Нет объединения для отмены.', 'אין איחוד קודם לביטול.'),
+    'Open object labeling': ('Открыть разметку объектов', 'פתיחת תיוג אובייקטים'),
+    'Open final results': ('Открыть итоговые результаты', 'פתיחת התוצאות הסופיות'),
+    'Train a model': ('Обучить модель', 'אימון מודל'),
+    'Native': ('Native', 'מקור'),
+    'Model': ('Модель', 'מודל'),
+    'Objects': ('Объекты', 'אובייקטים'),
+    'YOLO polygons': ('Полигоны YOLO', 'מצולעי YOLO'),
+    'Current measurements are required for merging.': ('Для объединения нужны актуальные измерения.', 'נדרשות מדידות עדכניות לאיחוד.'),
+    'Merging objects': ('Объединение объектов', 'איחוד אובייקטים'),
+    'Restoring previous segmentation': ('Возврат предыдущей сегментации', 'שחזור הפילוח הקודם'),
+    'Objects: {objects} · Labeled: {labeled} · Unlabeled: {unlabeled}': ('Объектов: {objects} · Размечено: {labeled} · Без класса: {unlabeled}', 'אובייקטים: {objects} · מתויגים: {labeled} · ללא תיוג: {unlabeled}'),
+}
+register_translations({k:v[0] for k,v in TEXT.items()}, hebrew={k:v[1] for k,v in TEXT.items()})

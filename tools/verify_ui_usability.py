@@ -1,7 +1,7 @@
 """Reproduce the desktop workflow on a temporary crop without editing data.
 
 Run with the scientific Python from the repository root. Screenshots and a
-verification report go to data/app_preview/usability_20261029. The real source
+verification report go to data/validation/Interface_check_NNN. The real source
 TIFF is opened read-only; the temporary project and its outputs are removed.
 """
 import json
@@ -22,13 +22,13 @@ from src.desktop.main_window import MainWindow
 from src.desktop.project import Project
 from src.desktop.widgets import image_pool
 from src.desktop import service
+from src.desktop.storage_names import new_version
 
 
 def main():
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
-    output = ROOT / 'data/app_preview/usability_20261029'
-    output.mkdir(parents=True, exist_ok=True)
+    output = new_version(ROOT/'data/validation', 'Interface_check')
     app = QtWidgets.QApplication([])
     stats = dict(source='G3, read-only crop 2048 × 2048', expert_labels_assigned=False)
 
@@ -53,6 +53,8 @@ def main():
     before = (source.stat().st_size, source.stat().st_mtime_ns)
     with tempfile.TemporaryDirectory(prefix='verification_', dir=output) as directory:
         base = Path(directory)
+        # Materialize only the test rectangle. All later UI actions operate
+        # on this standalone TIFF copied into the temporary project.
         mapping = tifffile.memmap(source)
         crop = np.array(mapping[7000:9048, 7000:9048], copy=True)
         mapping._mmap.close()

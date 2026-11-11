@@ -307,6 +307,7 @@ class ObjectReviewGallery(QtWidgets.QWidget):
         self.apply_filter()
 
     def set_rows(self, rows, dataset):
+        """Replace the measurement snapshot and retire its pending thumbnails."""
         copied = [dict(row) for row in rows]
         indexed = {}
         for row in copied:
@@ -362,6 +363,9 @@ class ObjectReviewGallery(QtWidgets.QWidget):
             words += ' ' + str(manual or '') + ' ' + self._class_name(manual)
             return not query or query in words.casefold()
         visible = [row for row in self.rows if matches(row)]
+        # The old Qt row indices refer to a different view after the reset.
+        # Restore selection by object identity, or keep its position if the
+        # object disappeared because a new label changed the active filter.
         self._selection_guard = True
         self._model.beginResetModel()
         self.visible_rows = visible
@@ -474,6 +478,7 @@ class ObjectReviewGallery(QtWidgets.QWidget):
         return QtGui.QIcon(pixmap)
 
     def _thumbnail_path(self, key):
+        """Resolve saved crops within the measurement's verification folder."""
         row = self._rows_by_key[key]
         if not self.dataset or not self.dataset.get('results_dir'):
             return None
@@ -495,6 +500,7 @@ class ObjectReviewGallery(QtWidgets.QWidget):
         return self._tile_paths[tile].get(int(row['Object_ID']))
 
     def _thumbnail(self, key):
+        """Schedule visible cards lazily and limit the number of pending decodes."""
         if key in self._cache:
             self._cache.move_to_end(key)
             return self._cache[key][0]
@@ -517,11 +523,14 @@ class ObjectReviewGallery(QtWidgets.QWidget):
             self._cache.popitem(last=False)
 
     def _thumbnail_ready(self, token, key, image, error):
+        # A delayed completion can refer to a previous measurement with the
+        # same tile name and object ID. The generation distinguishes them.
         task = self._tasks.get(key)
         if task is not None and task.token == token:
             self._tasks.pop(key, None)
         if token != self._token or self._disposed or error == 'cancelled':
             return
+        # The worker decodes a QImage. GUI-owned pixmaps are built here.
         icon = QtGui.QIcon(QtGui.QPixmap.fromImage(image)) if image is not None else self._placeholder
         self._cache_entry(key, icon, error)
         position = self._visible_indexes.get(key)

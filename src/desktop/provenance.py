@@ -7,12 +7,15 @@ import sys
 
 
 def runtime_provenance():
+    """Fingerprint the source tree and report versions available in this runtime."""
     root = Path(__file__).resolve().parents[2]
     digest = hashlib.sha256()
     files = sorted((root / 'src').rglob('*.py'))
     files += [root / name for name in ('app.py', 'requirements.txt')]
     for path in files:
         if path.is_file():
+            # Include the relative path so renamed or relocated modules are
+            # reflected even when their file contents match.
             digest.update(path.relative_to(root).as_posix().encode('utf-8'))
             digest.update(path.read_bytes())
     dependencies = {}

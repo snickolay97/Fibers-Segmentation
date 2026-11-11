@@ -8,6 +8,11 @@ import numpy as np
 
 
 def scale_metadata(height, width, target):
+    """Describe top-left aligned padding followed by optional uniform reduction.
+
+    A crop that fits is padded directly to the model side. A larger crop is
+    padded to a square in source pixels first, then reduced to the model side.
+    """
     side = max(int(height), int(width), int(target))
     scale = float(target) / side
     return dict(native_crop_shape=[int(height), int(width)],
@@ -22,6 +27,7 @@ def scale_metadata(height, width, target):
 
 
 def fixed_canvas(image, metadata, mask=False):
+    """Render the model canvas described by the crop's saved transform."""
     side = metadata['padded_native_shape'][0]
     h,w = image.shape[:2]
     if [h,w] != metadata['native_crop_shape']:
@@ -36,6 +42,7 @@ def fixed_canvas(image, metadata, mask=False):
 
 
 def output_to_source(points, record, global_coordinates=False, pixel_centers=False):
+    """Invert the model scale for XY edges or centres; optionally add the origin."""
     points = np.asarray(points,dtype=float)
     if points.shape[-1] != 2:
         raise ValueError('Expected x,y coordinates')
@@ -47,6 +54,7 @@ def output_to_source(points, record, global_coordinates=False, pixel_centers=Fal
 
 
 def measurement_factors(record, source_pixel_size_um):
+    """Convert model lengths and areas using the source pixel calibration."""
     if source_pixel_size_um <= 0:
         raise ValueError('Pixel calibration must be positive')
     length = record['transform']['source_pixels_per_output_pixel'] * source_pixel_size_um

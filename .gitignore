@@ -25,4 +25,6 @@ venv/
 # Local scientific audits, derived examples and transcripts stay on this machine.
 /docs/*
 !/docs/SOLODATA_RELEASE_2026-10-29_RU.md
+!/docs/SOLODATA_RELEASE_2026-11-11_RU.md
+!/docs/DATABASE_RESEARCH_2026-11-11_RU.md
 /test/Fiber Detection.py

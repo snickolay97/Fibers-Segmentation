@@ -7,3 +7,6 @@ pandas==2.3.3
 tifffile==2025.2.18
 Pillow==11.3.0
 PyQt6==6.9.1
+openpyxl==3.1.5
+matplotlib==3.10.6
+scikit-learn==1.7.2

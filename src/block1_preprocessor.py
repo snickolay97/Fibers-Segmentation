@@ -1,3 +1,4 @@
+"""Filter one grayscale source plane and build a separate routing mask."""
 import cv2
 import numpy as np
 from typing import Tuple
@@ -29,7 +30,11 @@ class GlobalPreprocessor:
 
     @staticmethod
     def _compute_fast_otsu(img_u8: np.ndarray) -> float:
-        """Computes Otsu threshold in <1ms via 256-bin histogram, avoiding giant array allocations."""
+        """Maximize between-class variance on a histogram with bin zero removed.
+
+        A sample with fewer than 50 nonzero pixels uses the fallback value 40.
+        Both the zero-bin exclusion and the fallback are project conventions.
+        """
         hist = cv2.calcHist([img_u8], [0], None, [256], [0, 256]).ravel()
         hist[0] = 0  # Ignore background zeros
         total = hist.sum()
@@ -40,6 +45,7 @@ class GlobalPreprocessor:
         weight_bg, sum_bg = 0.0, 0.0
         sum_total = np.dot(np.arange(256), hist)
 
+        # Carry the lower class count and intensity sum forward to each threshold.
         for t in range(256):
             weight_bg += hist[t]
             if weight_bg == 0:
@@ -58,6 +64,7 @@ class GlobalPreprocessor:
         return threshold
 
     def apply_bilateral(self, img_u8: np.ndarray) -> np.ndarray:
+        """Smooth using both intensity similarity and spatial proximity."""
         return cv2.bilateralFilter(
             img_u8,
             self.settings.bilateral_d,
@@ -66,17 +73,20 @@ class GlobalPreprocessor:
         )
 
     def apply_tophat(self, img_u8: np.ndarray) -> np.ndarray:
+        """Subtract the morphological opening and stretch the residual to 0–255."""
         k_size = self.settings.tophat_radius * 2 + 1
         kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k_size, k_size))
         processed = cv2.morphologyEx(img_u8, cv2.MORPH_TOPHAT, kernel)
         return cv2.normalize(processed, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
 
     def apply_gamma(self, img_u8: np.ndarray) -> np.ndarray:
+        """Apply the reciprocal-gamma convention, brightening with gamma above 1."""
         inv_gamma = 1.0 / self.settings.gamma
         table = np.array([((i / 255.0) ** inv_gamma) * 255 for i in range(256)]).astype(np.uint8)
         return cv2.LUT(img_u8, table)
 
     def process(self, img_u8: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+        """Return filtered intensities and the binary mask that constrains seams."""
         if img_u8.ndim != 2 or img_u8.dtype != np.uint8 or not img_u8.size:
             raise ValueError('Preprocessing requires a nonempty 2D uint8 image')
         filtered_img = img_u8
@@ -97,10 +107,14 @@ class GlobalPreprocessor:
         self._checkpoint('Building protective mask', 3, operation='otsu')
         print("      -> Step 4: Protective Mask Thresholding...")
         otsu_val = self._compute_fast_otsu(filtered_img)
+        # The factor and floor define a permissive routing threshold. They are
+        # separate from the local measurement threshold used in Block 3.
         safety_threshold = max(10, int(otsu_val * self.settings.otsu_safety_factor))
 
         _, raw_binary = cv2.threshold(filtered_img, safety_threshold, 255, cv2.THRESH_BINARY)
 
+        # Closing fills small gaps and dilation adds clearance around obstacles.
+        # Both operate on the binary mask, leaving filtered intensities available.
         if self.settings.enable_closing:
             self._checkpoint('Closing protective gaps', 4, operation='closing')
             print('      -> Step 5: Closing protective gaps...')

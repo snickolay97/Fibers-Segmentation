@@ -1,18 +1,17 @@
 """Minimal, backed-up recovery of invalid persisted project settings."""
 from collections.abc import Mapping
-from datetime import datetime, timezone
 import hashlib
 import math
 from pathlib import Path
-import uuid
 
 from src.app_settings import PipelineSettings, inspect_settings
 from src.default_settings import DEFAULTS_VERSION, FACTORY_DEFAULTS, factory_defaults
 from .project import atomic_json, timestamp
+from .storage_names import new_version
 
 
 def _json_safe(value):
-    """Keep bad historical values descriptive without writing NaN into JSON."""
+    """Represent invalid stored values using only serializable JSON types."""
     if isinstance(value,float) and not math.isfinite(value):
         return dict(type='float', representation=repr(value))
     if value is None or isinstance(value,(str,int,float,bool)):
@@ -36,9 +35,7 @@ def backup_project(project, reason='Project settings recovery'):
     if source.parent not in recovery.resolve().parents:
         raise ValueError('Recovery backups must remain beside the project')
     recovery.mkdir(exist_ok=True)
-    moment = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S.%fZ')
-    directory = recovery/(moment+'-'+uuid.uuid4().hex[:12])
-    directory.mkdir()
+    directory = new_version(recovery, 'Settings_recovery')
     target = directory/source.name
     with target.open('xb') as handle:
         handle.write(original)
@@ -81,14 +78,16 @@ def recover_project_settings(project):
         changes.append(dict(field=name, code=issue['code'], reason=issue['message'],
                             action=action, old=_json_safe(issue['value']),
                             new=_json_safe(replacement), defaults_version=DEFAULTS_VERSION))
-    # Fail before a backup/write if a future coupled rule cannot be repaired by
-    # replacing just its reported fields. Never silently reset every setting.
+    # Validate the proposed repair before creating a backup. Resetting one
+    # field can affect the valid range of another.
     PipelineSettings.from_dict(settings)
     backup_path = backup_project(project, reason='Repair invalid project settings')
     event = dict(time=timestamp(), action='recover_project_settings',
                  reason='Invalid persisted project settings', changes=changes,
                  defaults_version=DEFAULTS_VERSION, backup_path=backup_path)
     original_settings, original_history = project.settings, project.history
+    # Publish the repair and its explanation in the same project write. Keep
+    # the old in-memory state if the atomic disk replacement fails.
     project.settings = settings
     project.history = list(original_history)+[event]
     try:

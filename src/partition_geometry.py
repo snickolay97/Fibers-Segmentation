@@ -9,17 +9,23 @@ import numpy as np
 
 
 def checked_imwrite(path, image):
+    """Raise on an unsuccessful OpenCV write so the caller can abort publication."""
     if not cv2.imwrite(str(path), image):
         raise IOError("Could not write image: {}".format(path))
 
 
 def connected_components_striped(mask, labels, stripe_height=256):
-    """8-connected labels with bounded RAM; labels may be a disk-backed array."""
+    """Label the mask in stripes and return [x1, y1, x2, y2, area] per component.
+
+    Label 0 is background. Label storage may be disk-backed, with OpenCV only
+    holding the active stripe and the union table kept across stripes.
+    """
     h, w = mask.shape
     parent = [0]
     boxes = [[0, 0, 0, 0, 0]]
 
     def find(a):
+        # Path compression keeps repeated root lookups inexpensive.
         while parent[a] != a:
             parent[a] = parent[parent[a]]
             a = parent[a]
@@ -28,6 +34,7 @@ def connected_components_striped(mask, labels, stripe_height=256):
     for y in range(0, h, stripe_height):
         block = np.ascontiguousarray(mask[y:min(y + stripe_height, h)] > 0, dtype=np.uint8)
         n, local, stats, _ = cv2.connectedComponentsWithStats(block, connectivity=8)
+        # Give each stripe disjoint label IDs before merging across its boundary.
         offset = len(parent) - 1
         for k in range(1, n):
             x, yy, ww, hh, area = [int(v) for v in stats[k]]
@@ -35,6 +42,7 @@ def connected_components_striped(mask, labels, stripe_height=256):
             boxes.append([x, y + yy, x + ww, y + yy + hh, area])
         local[local > 0] += offset
         if y:
+            # Vertical and both diagonal contacts are required for 8-connectivity.
             previous = labels[y - 1]
             current = local[0]
             for delta in (-1, 0, 1):
@@ -48,6 +56,7 @@ def connected_components_striped(mask, labels, stripe_height=256):
                     if ra != rb:
                         parent[rb] = ra
         labels[y:y + len(local)] = local
+    # Compact union roots and aggregate half-open boxes plus pixel counts.
     roots = np.array([find(k) for k in range(len(parent))], dtype=np.int32)
     _, remap = np.unique(roots, return_inverse=True)
     remap = remap.astype(np.int32)
@@ -74,6 +83,7 @@ def ownership_boundary(owners):
 
 
 def render_overview(raw, owners, records, target_dim):
+    """Render source intensities with boundaries from the final ownership map."""
     h, w = owners.shape
     scale = min(1.0, float(target_dim) / max(h, w))
     size = (max(1, int(round(w * scale))), max(1, int(round(h * scale))))
@@ -95,17 +105,24 @@ def render_overview(raw, owners, records, target_dim):
         dist = cv2.distanceTransform(cv2.copyMakeBorder(local, 1, 1, 1, 1, cv2.BORDER_CONSTANT), cv2.DIST_L2, 3)[1:-1, 1:-1]
         yy, xx = np.unravel_index(np.argmax(dist), dist.shape)
         text = '#{:04d}'.format(rec['id'])
+        lines = [text,'EXCLUDED'] if rec.get('excluded') else [text]
         font_scale = max(0.35, min(0.8, size[0] / 7000.0))
-        (tw, th), _ = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, 1)
+        sizes = [cv2.getTextSize(line,cv2.FONT_HERSHEY_SIMPLEX,font_scale,1)[0] for line in lines]
+        tw = max(s[0] for s in sizes); th = max(s[1] for s in sizes)
+        total_height = len(lines)*(th+4)-4
         # Omit labels in slivers instead of placing them in a neighbouring tile.
-        tx, ty = x1 + xx - tw // 2, y1 + yy + th // 2
-        if tx >= 0 and ty - th >= 0 and tx + tw < size[0] and ty < size[1] and np.all(small[ty-th:ty+1, tx:tx+tw+1] == rec['id']):
-            cv2.putText(canvas, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 0, 0), 3, cv2.LINE_AA)
-            cv2.putText(canvas, text, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, font_scale, (0, 255, 0), 1, cv2.LINE_AA)
+        tx, top = x1 + xx - tw // 2, y1 + yy - total_height // 2
+        if tx >= 0 and top >= 0 and tx+tw < size[0] and top+total_height < size[1] and np.all(small[top:top+total_height+1,tx:tx+tw+1] == rec['id']):
+            color = (0,180,255) if rec.get('excluded') else (0,255,0)
+            for i,line in enumerate(lines):
+                at = (x1+xx-sizes[i][0]//2,top+th+i*(th+4))
+                cv2.putText(canvas,line,at,cv2.FONT_HERSHEY_SIMPLEX,font_scale,(0,0,0),3,cv2.LINE_AA)
+                cv2.putText(canvas,line,at,cv2.FONT_HERSHEY_SIMPLEX,font_scale,color,1,cv2.LINE_AA)
     return canvas
 
 
 def read_manifest(path):
+    """Load an exact-ownership v2 or v3 manifest."""
     with open(str(path), encoding='utf-8') as handle:
         manifest = json.load(handle)
     if not isinstance(manifest, dict) or manifest.get('schema_version') not in (2,3):
@@ -143,6 +160,7 @@ def png_shape(path):
 
 
 def find_dataset_manifest(base_dir):
+    """Select the unique coordinate manifest for a prepared dataset."""
     base = Path(base_dir).resolve()
     candidates = sorted((base / 'overview').glob('*_tiles_coords.json'))
     if len(candidates) != 1:
@@ -191,6 +209,7 @@ def validate_dataset(base_dir, manifest=None, require_v3=True, check_pixels=Fals
         x1, y1, x2, y2 = coords
         if not (0 <= x1 < x2 <= w and 0 <= y1 < y2 <= h):
             raise ValueError('Tile {} coordinates lie outside source'.format(ident))
+        # Boxes use half-open source coordinates; model sizes can differ.
         crop_shape = (y2-y1, x2-x1)
         filename = rec.get('filename')
         model = dataset_path(base, filename)
@@ -238,6 +257,8 @@ def validate_dataset(base_dir, manifest=None, require_v3=True, check_pixels=Fals
     if sum(rec['valid_pixels'] for rec in records) != h*w:
         raise ValueError('Manifest valid_pixels do not sum to source area')
     if check_pixels:
+        # Occupancy needs one byte per source pixel. The mapped plane avoids
+        # another large in-memory array while checking disjoint, full coverage.
         with tempfile.TemporaryDirectory(prefix='fiber_validation_') as tmp:
             owners = np.memmap(Path(tmp)/'coverage.dat', dtype=np.uint8, mode='w+', shape=(h,w))
             try:
@@ -278,6 +299,7 @@ def validate_dataset(base_dir, manifest=None, require_v3=True, check_pixels=Fals
 
 
 def restore_ownership(base_dir, manifest, owners, active_ids=None):
+    """Restore ownership by tile ID from native masks, leaving omitted IDs as 0."""
     base = Path(base_dir).resolve()
     owners[:] = 0
     for rec in manifest['tiles']:

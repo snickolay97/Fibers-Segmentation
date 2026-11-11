@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from src import config
 from src.app_settings import PipelineSettings, PipelineCancelled
+from src.default_settings import FACTORY_DEFAULTS, STRAIGHT_SHIFT_FIELDS
 from src.image_io import inspect_tiff, load_tiff_channel
 from src.block1_preprocessor import GlobalPreprocessor
 from src.block2_slicer import SmartSlicer
@@ -15,6 +16,7 @@ from src.partition_geometry import validate_dataset
 
 
 class BiomedicalPipelineManager:
+    """Run the scientific stages with a shared snapshot of the run settings."""
     def __init__(self, input_dir=config.INPUT_DIR, output_dir=config.OUTPUT_DIR,
                  raw_output_dir=config.RAW_OUTPUT_DIR, labels_dir=config.LABELS_DIR,
                  features_dir=config.FEATURES_DIR, settings=None, progress=None,
@@ -53,12 +55,15 @@ class BiomedicalPipelineManager:
             raise PipelineCancelled('Operation cancelled')
 
     def run(self, mode='filter_and_slice', **kwargs):
+        """Dispatch the workflow and collect independent per-dataset outcomes."""
         summary = self._summary()
         try:
             self._checkpoint()
             if mode in ('filter_and_slice', 'end_to_end'):
                 summary = self._execute_filter_and_slice()
                 if mode == 'end_to_end' and not summary['cancelled']:
+                    # A failed source must not cause stale tiles in its output
+                    # folder to be measured as part of this run.
                     records = [record for record in summary['datasets']
                                if record['status'] in ('processed', 'skipped')]
                     self._execute_extract_features(records=records, summary=summary,
@@ -100,6 +105,7 @@ class BiomedicalPipelineManager:
 
     @staticmethod
     def _source_signature(path):
+        """Record source identity, size and timestamp for reuse and publish checks."""
         source = Path(path).resolve()
         stat = source.stat()
         return dict(path=str(source), size_bytes=stat.st_size, mtime_ns=stat.st_mtime_ns)
@@ -113,7 +119,12 @@ class BiomedicalPipelineManager:
         manifest = validate_dataset(folder, require_v3=True, check_pixels=False)
         previous = manifest.get('run_info')
         if previous:
-            if previous.get('settings') != self.settings.to_dict():
+            previous_settings = previous.get('settings')
+            if isinstance(previous_settings, dict):
+                # Older manifests omit controls that used the current Auto geometry.
+                tiling_fields = ('search_window_end', *STRAIGHT_SHIFT_FIELDS)
+                previous_settings = {key: FACTORY_DEFAULTS[key] for key in tiling_fields} | previous_settings
+            if previous_settings != self.settings.to_dict():
                 raise ValueError('Existing dataset uses different settings. Choose a new output folder.')
             if previous.get('source') != self._source_signature(path):
                 raise ValueError('Existing dataset comes from a different or modified source. Choose a new output folder.')
@@ -124,6 +135,7 @@ class BiomedicalPipelineManager:
 
     @staticmethod
     def _publish(stage, destination, root):
+        """Expose a completed staged dataset by a checked same-root rename."""
         stage, destination, root = Path(stage).resolve(), Path(destination).resolve(), Path(root).resolve()
         if root not in stage.parents or destination.parent != root:
             raise ValueError('Dataset publication must stay inside the selected output directory')
@@ -132,6 +144,7 @@ class BiomedicalPipelineManager:
         os.rename(stage, destination)
 
     def _execute_filter_and_slice(self):
+        """Prepare each selected TIFF and publish only validated tile sets."""
         summary = self._summary()
         if self.input_files is not None:
             sources = [Path(path).resolve() for path in self.input_files]
@@ -175,6 +188,8 @@ class BiomedicalPipelineManager:
                 self._event(dict(stage='load', status='running', message='Loading selected channel and plane'))
                 run_info = self._run_info(source)
                 native_raw, processing = load_tiff_channel(source, self.settings.channel, self.settings.plane)
+                # Filtering operates on the uint8 representation. The optional
+                # raw export keeps the selected source plane's original depth.
                 self._checkpoint()
                 filtered, protective = self.preprocessor.process(processing)
                 self._checkpoint()
@@ -227,6 +242,7 @@ class BiomedicalPipelineManager:
 
     def _execute_extract_features(self, records=None, summary=None, labels_mode='auto',
                                   allow_legacy=False, dataset_names=None):
+        """Measure prepared datasets, or reuse successful records from this run."""
         summary = self._summary() if summary is None else summary
         combined = records is not None
         if records is None:
@@ -265,6 +281,8 @@ class BiomedicalPipelineManager:
                     summary['processed'] += 1
                 self._event(dict(stage='features', status='completed', message='Feature analysis finished', result=result))
             except PipelineCancelled:
+                # In combined mode the dataset already counted as sliced.
+                # Replace that outcome with the final cancellation status.
                 if combined and prior_status in ('processed', 'skipped'):
                     summary[prior_status] -= 1
                     record['slice_status'] = prior_status

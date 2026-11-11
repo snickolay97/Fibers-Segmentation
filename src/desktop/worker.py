@@ -11,6 +11,8 @@ from src.desktop.i18n import set_language
 
 
 class LogStream:
+    """Turn partial library writes into complete JSON log events."""
+
     def __init__(self, emit):
         self.emit = emit
         self.buffer = ''
@@ -30,9 +32,12 @@ class LogStream:
 
 
 def main(argv=None):
+    """Execute a single saved request and record its progress and terminal result."""
     parser = argparse.ArgumentParser()
     parser.add_argument('--request', required=True)
     args = parser.parse_args(argv)
+    # Keep the real stdout for the protocol. Library prints go through LogStream
+    # below, so scientific progress cannot be confused with a result packet.
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
     output = sys.stdout
@@ -52,6 +57,8 @@ def main(argv=None):
         from src.app_settings import PipelineCancelled
         from src.desktop.service import execute_action
         project = Project.load(request['project_path'])
+        # The GUI creates this sidecar to request cooperative cancellation.
+        # Services check it between operations where outputs can stay consistent.
         cancel_path = Path(str(request_path) + '.cancel')
         with contextlib.redirect_stdout(log), contextlib.redirect_stderr(log):
             summary = execute_action(project, request,

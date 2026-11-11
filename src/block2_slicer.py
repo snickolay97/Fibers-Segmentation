@@ -53,6 +53,22 @@ class SmartSlicer:
             raise ValueError('Search step and corridor width must be positive')
         if self.oversized_policy not in ('preserve', 'error'):
             raise ValueError('oversized_policy must be preserve or error')
+        left = settings.straight_shift_left if settings is not None else None
+        self.straight_shift_left_automatic = left is None
+        self.straight_shift_left = self.base_step - self.min_margin_limit if self.straight_shift_left_automatic else left
+        self.straight_shift_right = settings.straight_shift_right if settings is not None else 0
+        # Try the exact manual limit if it falls between steps. Automatic
+        # left/up shifting keeps the historical sequence of full steps.
+        shifts = [0]
+        for direction, limit, include_limit in (
+                (-1, self.straight_shift_left, left is not None),
+                (1, self.straight_shift_right, True)):
+            shifts.extend(direction * distance for distance in range(self.dynamic_step, limit + 1, self.dynamic_step))
+            if include_limit and limit % self.dynamic_step:
+                shifts.append(direction * limit)
+        # The zero shift comes first. At equal distances prefer left/up.
+        shifts.sort(key=lambda shift: (abs(shift), shift))
+        self._straight_offsets = [self.base_step + shift for shift in shifts]
         self.search_stats = {}
 
     def _checkpoint(self, message=None, current=None, total=None):
@@ -64,10 +80,18 @@ class SmartSlicer:
 
     @staticmethod
     def _find_safe_corridor_cut(sums, min_width):
+        """Choose the center of the widest run that meets a corridor width.
+
+        Try the preferred width first, then the historical fallback.
+        Return None when neither trial finds a corridor.
+        """
         zero = np.asarray(sums) == 0
+        # False sentinels make a free run at either end detectable by diff.
         changes = np.diff(np.r_[False, zero, False].astype(np.int8))
         starts, ends = np.flatnonzero(changes == 1), np.flatnonzero(changes == -1)
         widths = ends - starts
+        # Prefer the requested width. The second pass is a legacy fallback
+        # for windows without a sufficiently wide corridor.
         for limit in (min_width, max(3, min_width // 2)):
             eligible = np.flatnonzero(widths >= limit)
             if eligible.size:
@@ -87,6 +111,8 @@ class SmartSlicer:
         if not free[0].any() or not free[-1].any():
             return np.array([], dtype=int), float('inf')
         distance = cv2.distanceTransform(free, cv2.DIST_L2, 5)
+        # Bias the route toward the interior of the free space. Infinite
+        # cost prevents visiting occupied vertices.
         costs = 1.0 / (distance ** self.seam_repulsion_power + 1e-3)
         costs[free == 0] = np.inf
         # Directed offsets give exactly one point per row. This prevents the
@@ -108,31 +134,32 @@ class SmartSlicer:
             raise RuntimeError('Path crosses an obstacle')
         return seam, cost
 
-    def _boundary(self, block):
+    def _boundary(self, block, trace=None):
         """Vertical boundary in local coordinates; None means deferred routing."""
         h, w = block.shape
         trials = []
         def finish(seam, method):
-            if self.enable_animation and hasattr(self, '_animation_name'):
-                self._animation_counter += 1
-                save_search_animation(Path(self.animation_dir)/self._animation_name,
-                    self._animation_name,self._animation_counter,self._animation_axis,
-                    self._animation_origin,block,self._animation_background,trials,seam,method,
-                    self.animation_max_trial_frames)
+            if trace is not None:
+                trace.append((block, trials, seam, method))
             return seam
         if w <= self.base_step:
             self.search_stats['edge'] += 1
             return np.full(h, w, dtype=int)
         width = self.max_step - self.base_step
         # Compute the projection once, instead of summing overlapping windows.
-        projection = np.any(block[:, :self.max_step], axis=0)
-        for offset in range(self.base_step, self.min_margin_limit - 1, -self.dynamic_step):
+        projection = np.any(block[:, :self.max_step + self.straight_shift_right], axis=0)
+        for offset in self._straight_offsets:
+            if offset >= w:
+                continue
             self._checkpoint()
-            trials.append([offset,min(offset+width,w)])
-            cut = self._find_safe_corridor_cut(projection[offset:min(offset + width, w)], self.min_corridor_width)
+            end = min(offset + width, w)
+            trials.append([offset, end])
+            cut = self._find_safe_corridor_cut(projection[offset:end], self.min_corridor_width)
             if cut is not None:
                 self.search_stats['corridor'] += 1
                 return finish(np.full(h, offset + cut, dtype=int),'straight corridor')
+        # Straight trials can move; the directed route uses the configured
+        # initial window. Its vertices are converted back to crop coordinates.
         trials.append([self.base_step,min(self.max_step,w)])
         seam, cost = self.find_topographical_seam(block[:, self.base_step:self.max_step], 'vertical')
         if np.isfinite(cost):
@@ -141,18 +168,21 @@ class SmartSlicer:
         self.search_stats['deferred'] += 1
         return finish(None,'unreachable')
 
-    def _proposal_partition(self, mask, owners):
+    def _proposal_partition(self, mask, owners, animation_traces=None):
+        """Build provisional right/bottom seams and fill any uncovered pixels."""
         h, w = mask.shape
         records = []
         self.search_stats = dict(edge=0, corridor=0, dijkstra=0, deferred=0)
 
-        def add(x1, y1, x2, y2, local, kind):
+        def add(x1, y1, x2, y2, local, kind, traces=()):
             view = owners[y1:y2, x1:x2]
             valid = local & (view == 0)
             if valid.any():
                 tid = len(records) + 1
                 view[valid] = tid
                 records.append(dict(id=tid, x1=x1, y1=y1, x2=x2, y2=y2, kind=kind))
+                if animation_traces is not None and any(traces):
+                    animation_traces[tid] = traces
 
         ya = 0
         while ya < h:
@@ -162,24 +192,21 @@ class SmartSlicer:
                 self._checkpoint()
                 span = min(ya + self.target_size, h)
                 block = mask[ya:span, xa:min(xa + self.target_size, w)]
-                if self.enable_animation:
-                    self._animation_axis='right';self._animation_origin=(xa,ya)
-                    self._animation_background=self._animation_image[ya:span,xa:min(xa+self.target_size,w)]
-                right = self._boundary(block)
+                right_trace, bottom_trace = ([], []) if animation_traces is not None else (None, None)
+                right = self._boundary(block, right_trace)
                 deferred = right is None
                 if deferred:
                     right = np.full(len(block), min(self.base_step, w - xa), dtype=int)
                 mx = int(right.max())
-                if self.enable_animation:
-                    self._animation_axis='bottom'
-                    self._animation_background=self._animation_image[ya:min(ya+self.target_size,h),xa:xa+mx].swapaxes(0,1)
-                bottom = self._boundary(mask[ya:min(ya + self.target_size, h), xa:xa + mx].T)
+                # Transposing the mask reuses vertical routing for the bottom seam.
+                bottom = self._boundary(mask[ya:span, xa:xa + mx].T, bottom_trace)
                 deferred |= bottom is None
                 if bottom is None:
                     bottom = np.full(mx, min(self.base_step, h - ya), dtype=int)
                 my = int(bottom.max())
                 local = (np.arange(mx)[None, :] < right[:my, None]) & (np.arange(my)[:, None] < bottom[None, :])
-                add(xa, ya, xa + mx, ya + my, local, 'provisional' if deferred else 'adaptive')
+                add(xa, ya, xa + mx, ya + my, local, 'provisional' if deferred else 'adaptive',
+                    (right_trace, bottom_trace))
                 xa += max(1, int(right.min()))
                 bottoms.append(ya + int(bottom.min()))
             ya = min(bottoms) if bottoms else min(ya + self.base_step, h)
@@ -192,7 +219,26 @@ class SmartSlicer:
                     add(x, y, x2, y2, np.ones((y2-y, x2-x), bool), 'coverage_repair')
         return records
 
+    def _save_tile_animations(self, base_name, raw_img, rec, traces):
+        """Render the searches that led to this exported tile's proposal."""
+        x, y = rec['x1'], rec['y1']
+        saved = 0
+        for axis, trace in zip(('right', 'bottom'), traces):
+            for block, trials, seam, method in trace:
+                self._checkpoint()
+                h, w = block.shape
+                if axis == 'right':
+                    background = raw_img[y:y+h, x:x+w]
+                else:
+                    background = raw_img[y:y+w, x:x+h].swapaxes(0, 1)
+                save_search_animation(Path(self.animation_dir) / base_name, base_name, rec['id'],
+                                      axis, (x, y), block, background, trials, seam, method,
+                                      self.animation_max_trial_frames)
+                saved += 1
+        return saved
+
     def _allocate_components(self, labels, stats, owners, records):
+        """Reassign each protected component as a unit after seam proposals."""
         h, w = labels.shape
         repaired, oversized = 0, 0
         component_owner = np.zeros(len(stats), np.int32)
@@ -212,6 +258,8 @@ class SmartSlicer:
                         votes[int(owner)] = votes.get(int(owner),0)+int(num)
                 rec = max(candidates,key=lambda r:votes.get(r['id'],0))
             else:
+                # None of the proposed crops encloses the bounding box.
+                # Allocate a new crop that can hold the entire component.
                 big = x2-x1 > self.target_size or y2-y1 > self.target_size
                 if big and self.oversized_policy == 'error':
                     raise ValueError('Component {} needs {}x{} pixels, larger than target'.format(component, x2-x1, y2-y1))
@@ -232,8 +280,8 @@ class SmartSlicer:
                 view[valid] = tid
             repaired += int(changed)
             component_owner[component] = tid
-        # Validate independently by scanning the final partition. This also
-        # catches diagonal components split by intersecting search proposals.
+        # Check the final partition after all reassignments. Each protected
+        # pixel must have the owner recorded for its 8-connected component.
         covered = 0
         for y in range(0, h, 256):
             self._checkpoint()
@@ -249,6 +297,7 @@ class SmartSlicer:
                     covered_pixels=covered, total_pixels=h*w)
 
     def slice(self, filtered_img, raw_img, mask, base_name, output_dir, raw_output_dir=None, run_info=None):
+        """Write v3 tiles with native pixels, model canvases and exact ownership masks."""
         self._checkpoint('Preparing tile export')
         if mask.ndim != 2 or not mask.size or filtered_img.shape != mask.shape or raw_img.shape[:2] != mask.shape:
             raise ValueError('Expect nonempty 2D filtered/mask arrays and matching raw image dimensions')
@@ -262,17 +311,18 @@ class SmartSlicer:
             if list(folder.glob(base_name + '_tile_*.png')):
                 raise FileExistsError('Choose a new output directory; existing tiles will not be overwritten: {}'.format(folder))
             folder.mkdir(parents=True, exist_ok=True)
-        if self.enable_animation:
-            self._animation_name=base_name;self._animation_counter=0
-            self._animation_image=raw_img
+        animation_traces = {} if self.enable_animation else None
+        animation_count = 0
         started = time.perf_counter()
         h, w = mask.shape
+        # Keep the two full-image label maps on disk. Process local rectangles
+        # or strips so their working arrays stay bounded on large TIFFs.
         with tempfile.TemporaryDirectory(prefix='.partition_', dir=str(out)) as work:
             owners = np.memmap(os.path.join(work, 'owners.dat'), dtype=np.int32, mode='w+', shape=(h,w))
             labels = np.memmap(os.path.join(work, 'labels.dat'), dtype=np.int32, mode='w+', shape=(h,w))
             try:
                 print('   - Building adaptive proposals...', flush=True)
-                records = self._proposal_partition(mask, owners)
+                records = self._proposal_partition(mask, owners, animation_traces)
                 print('   - Labelling protected components in strips...', flush=True)
                 self._checkpoint('Labelling protective components')
                 stats = connected_components_striped(mask, labels)
@@ -291,6 +341,11 @@ class SmartSlicer:
                         (folder/'coverage_masks').mkdir(exist_ok=True)
                 for i, rec in enumerate(records):
                     self._checkpoint('Saving native pixels and model tiles', i, len(records))
+                    # Only exported IDs get GIFs. Component repair can remove a
+                    # provisional tile, so defer rendering until ownership is final.
+                    if animation_traces is not None:
+                        animation_count += self._save_tile_animations(
+                            base_name, raw_img, rec, animation_traces.pop(rec['id'], ()))
                     x1,y1,x2,y2 = [rec[k] for k in ('x1','y1','x2','y2')]
                     valid = owners[y1:y2,x1:x2] == rec['id']
                     if int(valid.sum()) != counts[rec['id']]:
@@ -310,6 +365,8 @@ class SmartSlicer:
                         rec['quality']['review_bright_region']=rec['quality']['raw_fraction_ge_250']>.01
                     for folder,source in [(out,filtered_img)] + ([(raw_out,raw_img)] if raw_out else []):
                         tile = source[y1:y2,x1:x2].copy()
+                        # Crop rectangles may overlap. Only pixels assigned to
+                        # this tile can contribute to its image and measurements.
                         tile[~valid] = 0
                         checked_imwrite(folder/rec['native_filename'],tile)
                         checked_imwrite(folder/rec['filename'],fixed_canvas(tile,rec['transform']))
@@ -318,11 +375,18 @@ class SmartSlicer:
                             checked_imwrite(folder/rec['coverage_mask'],coverage)
                     if (i+1)%25==0:
                         print('   - Saved {}/{} tiles'.format(i+1,len(records)),flush=True)
-                checks.update(tile_count=len(records), search=self.search_stats, search_animations=getattr(self,'_animation_counter',0),
+                checks.update(tile_count=len(records), search=self.search_stats, search_animations=animation_count,
                               seconds_before_overview=round(time.perf_counter()-started,3))
                 manifest = dict(schema_version=3, source_name=base_name, image_shape=[h,w],
                                 guarantee='8-connected components of the supplied obstacle mask',
-                                parameters=dict(target_size=self.target_size,margin_start=self.base_step,margin_end=self.max_step,dynamic_step=self.dynamic_step,min_margin_limit=self.min_margin_limit,min_corridor_width=self.min_corridor_width,oversized_policy=self.oversized_policy),
+                                parameters=dict(target_size=self.target_size, margin_start=self.base_step,
+                                                margin_end=self.max_step, dynamic_step=self.dynamic_step,
+                                                min_margin_limit=self.min_margin_limit,
+                                                straight_shift_left=self.straight_shift_left,
+                                                straight_shift_left_automatic=self.straight_shift_left_automatic,
+                                                straight_shift_right=self.straight_shift_right,
+                                                min_corridor_width=self.min_corridor_width,
+                                                oversized_policy=self.oversized_policy),
                                 checks=checks, tiles=records)
                 if run_info is not None:
                     manifest['run_info'] = run_info
@@ -338,9 +402,6 @@ class SmartSlicer:
                 print('   - Validated: {} tiles, {} protected components, zero component splits.'.format(len(records),len(stats)-1),flush=True)
                 return manifest
             finally:
-                # Release views before TemporaryDirectory removes mapped files on Windows.
-                for attr in ('_animation_image','_animation_background'):
-                    if hasattr(self,attr):delattr(self,attr)
                 for array in (owners,labels):
                     array.flush()
                     array._mmap.close()

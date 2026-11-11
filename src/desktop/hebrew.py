@@ -1,7 +1,35 @@
 """Canonical English-to-Hebrew UI text; scientific CSV keys stay unchanged."""
 
 HEBREW_TRANSLATIONS = {}
+HEBREW_TRANSLATIONS.update({
+    'Brush': 'מברשת',
+    'Eraser': 'מחק',
+    'Open charts in a separate window…': 'פתיחת התרשימים בחלון נפרד…',
+})
 HELP_HEBREW = {}
+
+HEBREW_TRANSLATIONS.update({
+    'Highlight object': 'הדגשת האובייקט',
+    'Locating the selected object…': 'איתור האובייקט שנבחר…',
+    'The exact measured mask is highlighted.': 'מסכת המדידה המדויקת של האובייקט מודגשת.',
+    'Located by a unique exact match of the saved crop.': 'המיקום נמצא לפי התאמה מדויקת ויחידה של החיתוך השמור.',
+    'This older result cannot be located unambiguously. Recalculate to save object positions.': 'לא ניתן לאתר תוצאה ישנה זו באופן חד־משמעי. חשבו שוב כדי לשמור מיקומי אובייקטים.',
+    'Active edit: {version}. Recalculate measurements after changing it.': 'העריכה הפעילה היא {version}. חשבו מחדש את המדידות לאחר שינוי.',
+    'Another tile edit is being saved. Try again.': 'עריכה אחרת של אריח נשמרת כעת. נסו שוב.',
+    'Native source pixels for editing': 'פיקסלי מקור לעריכה',
+    'Only a project-owned dataset can use edited tiles.': 'אפשר להחיל עריכות רק במערך שנמצא בתוך הפרויקט.',
+    'Open the native tile to save edits for measurement.': 'פתחו את אריח המקור כדי לשמור עריכות למדידה.',
+    'Overview predates the active edits. Choose Rebuild overview.': 'המפה נוצרה לפני העריכות הפעילות. בחרו בנייה מחדש של המפה.',
+    'Restore prepared tile': 'שחזור האריח המוכן',
+    'The prepared pixels differ from this saved edit.': 'פיקסלי ההכנה שונים מהבסיס של העריכה השמורה.',
+    'The saved edit has invalid image dimensions or ownership.': 'לעריכה השמורה יש ממדים או שיוך פיקסלים לא תקינים.',
+    'This resized model copy cannot become native measurement data. Redo the edit on the native tile.': 'אי אפשר להשתמש בעותק המודל המוקטן כנתוני מקור למדידה. חזרו על העריכה באריח המקור.',
+    'This saved edit belongs to another tile or dataset.': 'העריכה השמורה שייכת לאריח או למערך אחר.',
+    'This tile changed in another window. Reopen it before saving.': 'האריח השתנה בחלון אחר. פתחו אותו מחדש לפני שמירה.',
+    'Tile edits changed during measurement. Recalculate the features.': 'עריכות האריחים השתנו במהלך המדידה. חשבו מחדש את התכונות.',
+    'Tile saved for measurement. Recalculate the features.': 'האריח נשמר למדידה. חשבו מחדש את התכונות.',
+    'Use saved edit…': 'שימוש בעריכה שמורה…',
+})
 
 HELP_HEBREW.update({
     'enable_bilateral':'הפעלה או עקיפה של הסרת רעש בסינון דו־צדדי. כשהשלב מופעל, הקוטר והסיגמות של העוצמה והמרחק קובעים את ההחלקה לפני השלב הבא. הכיבוי אינו משנה את פיקסלי המקור השמורים.',
@@ -11,6 +39,9 @@ HELP_HEBREW.update({
     'enable_dilation':'הפעלה או עקיפה של הרחבת מסכת ההגנה. ההרחבה מוסיפה שוליים לפיקסלים מוגנים ועשויה לחבר רכיבים סמוכים. הכיבוי מסיר את השוליים האלה, אך אינו משנה את מסכת העצם המשמשת למדידה לאחר החלת הסף.',
     'language':'שפת הממשק. אנגלית היא ברירת המחדל, והבחירה נשמרת להפעלה הבאה. שינוי השפה משנה כיתובים והסברים בלי לשנות הגדרות מדעיות, מדידות שמורות או מפתחות מחלקות.',
     'target_size':'רוחב וגובה אריח המודל הריבועי בפורמט PNG, בפיקסלים. עצמים מוגנים גדולים נשמרים בשלמותם ויכולים להצטמצם כדי להתאים לאריח. החיתוכים בקנה המידה המקורי ומטא־נתוני קנה המידה נשמרים למדידה.',
+    'straight_shift_left':'הזזה מרבית של חלון המסדרון הישר שמאלה או למעלה, בפיקסלי המקור. מצב אוטומטי משתמש בחיפוש המקורי. אפס מבטל הזזה לצד זה.',
+    'straight_shift_right':'הזזה מרבית של חלון המסדרון הישר ימינה או למטה, בפיקסלי המקור. אפס מבטל הזזה לצד זה. דייקסטרה פועל בחלון הראשון.',
+    'search_window_end':'הקצה הימני או התחתון של חלון החיפוש הראשון בפיקסלי מקור. פיקסל הקצה אינו כלול. במצב אוטומטי הקצה הוא floor(0.975 × גודל האריח). באריח של 1500 פיקסלים, קצה 1400 מאפשר להזיז את החלון עד 100 פיקסלים ימינה או למטה.',
     'overview_size':'אורך הצלע המרבי של תמונת הסקירה. משפיע על רזולוציית התצוגה, לא על שיוך הפיקסלים לאריחים או על קנה המידה במדידה. סקירות גדולות דורשות יותר שטח דיסק וזיכרון לתצוגה.',
     'channel':'אינדקס ערוץ מתוך מטא־נתוני ה־TIFF, החל מ־0. בתמונת RGB: ‏0=אדום, 1=ירוק, 2=כחול. בתמונה בגוני אפור הערוץ הוא 0. הערוץ חייב להיות קיים בכל תמונת מקור שנבחרה.',
     'plane':'אינדקס מישור החל מ־0 בציר Z, I או T של ה־TIFF. בתמונה דו־ממדית משתמשים ב־0. נבחר מישור יחיד, ללא הטלה או שילוב מישורים. מחסניות בעלות כמה צירים לא חד־משמעיים נדחות.',
@@ -37,8 +68,8 @@ HELP_HEBREW.update({
     'tile_filter':'הצגת אריחים פעילים, מוחרגים או בעלי אזורים בהירים. הסימונים של אזורים בהירים הם רמזים לבדיקה ולא חיזוי של מחלקה ביולוגית. רק החרגה מפורשת משנה את קבוצת האריחים הפעילה במדידות.',
     'tile_ids':'הזינו מזהים וטווחים מופרדים בפסיקים, כגון 4,12-18, או בחרו שורות. החרגה מעבירה רק PNG של המודל אל excluded_tiles; החזרה מחזירה אותם. החיתוכים המקוריים, מסכות השיוך והמטא־נתונים נשארים. המזהים שייכים להפעלת חלוקה זו.',
     'labels_mode':'סימונים קיימים בלבד: מדידת המצולעים הזמינים. דרישה לכולם: נדרש TXT לכל אריח פעיל. השלמה אוטומטית: כשחסר TXT משתמשים בקווי מתאר שזוהו ובמחלקת מקור לא ידועה. TXT ריק תמיד מציין שאין עצמים מסומנים ואינו מבקש זיהוי אוטומטי.',
-    'image_viewer':'גררו להזזת התמונה; השתמשו בגלגלת או ב־+/− לשינוי התקריב. לחיצה כפולה או F11 פותחים חלון נפרד במסך מלא, ו־Esc סוגר אותו. התצוגה מוגבלת בגודלה; המדידות מתבססות על פיקסלי המקור.',
-    'image_fullscreen':'פתיחת התמונה שנטענה בחלון נפרד במסך מלא, עם אותם מצולעים וקואורדינטות לחיצה בפיקסלי המקור. הזזה, תקריב והתאמה לחלון פועלים בנפרד מהלוח המקורי. פתחו בלחיצה כפולה או F11 וסגרו ב־Esc או F11. החלון נסגר כשמחליפים את תמונת המקור.',
+    'image_viewer':'לחצו על גלגלת העכבר וגררו להזזת התמונה. גלגלו את הגלגלת או השתמשו ב־+/− לשינוי התקריב. לחיצה כפולה פותחת חלון נפרד שניתן לשנות את גודלו. F11 פותח מסך מלא.',
+    'image_fullscreen':'פתיחת התמונה בחלון נפרד שניתן לשנות את גודלו. הזזה, תקריב והתאמה לחלון פועלים בנפרד מהלוח המקורי. הסרגל וכלי המתאר נמצאים בסרגל הכלים העליון. F11 פותח מסך מלא.',
     'image_zoom':'שינוי תקריב התצוגה בלי לשנות קובצי תמונה או את קנה המידה של המדידות.',
     'image_fit':'התאמת התמונה המקדימה כולה לשטח החלון הזמין.',
     'result_search':'חיפוש בשורות המאפיינים לפי אריח או עצם. ייצוא מסונן כולל רק את השורות המוצגות; ייצוא לאימון משתמש בבחירת הסיווג שלו.',
@@ -48,7 +79,14 @@ HELP_HEBREW.update({
     'manual_export':'ייצוא המאפיינים המדעיים עם Manual_Class_ID כיעד אימון שנבדק, באותם מזהי מחלקות כמו YOLO. כברירת מחדל נכללים רק עצמים שסווגו. Class_ID ו־Class_Name המקוריים נשארים ב־CSV כמטא־נתונים; הם ומזהי המקור אינם נכללים במנבאים. הנתונים מיוצאים לצורך אימון עתידי.',
 })
 
+HELP_HEBREW.update({
+    'image_original': 'פתיחת הקובץ השמור בחלון נפרד ברזולוציה המקורית. מצב פיקסלים 1:1 מציג פיקסלים שמורים ללא הקטנת תצוגה. תמונות מעל 32 מגה־פיקסל נפתחות במציג המערכת. מפה מוקטנת לא תחזיר פרטים; השתמשו במפת גבולות מפורטת ברזולוציית המקור.',
+    'detailed_map': 'שחזור ושמירת PNG נפרד בממדי המקור עם גבולות האריחים הפעילים ופתיחתו ברזולוציה המקורית. נדרשים זמן, זיכרון ומקום נוספים. המדידות והחלוקה אינן משתנות; אריחים שהוחרגו נשארים מוחרגים.',
+    'result_tile': 'פתיחת האריח המלא של העצם שנבחר בגלריה או בטבלה. עדיפות לפיקסלי המקור; בהיעדרם מוצג משטח מודל המסומן במפורש. ה־CSV הנוכחי אינו כולל קואורדינטות עצם ולכן מיקומו אינו מודגש. הפעולה משנה רק את התצוגה.',
+})
+
 HEBREW_TRANSLATIONS.update({
+    'Tile actions': 'פעולות באריחים',
     'Sources':'תמונות מקור', 'Preparation':'הכנה', 'Tiles':'אריחים', 'Annotations':'סימונים',
     'Results':'תוצאות', 'New project':'פרויקט חדש', 'Open':'פתיחה', 'Save':'שמירה',
     'Dark theme':'ערכת צבעים כהה', 'Light theme':'ערכת צבעים בהירה', 'Dataset:':'מערך נתונים:',
@@ -233,6 +271,8 @@ def translate_hebrew(text):
         return text
     if text in HEBREW_TRANSLATIONS:
         return HEBREW_TRANSLATIONS[text]
+    # Some worker diagnostics already contain dynamic values. Translate only
+    # the known literal parts and preserve the reported axes or path verbatim.
     prefix, suffix = 'Ambiguous TIFF axes: ', '. Export with explicit spatial/channel/plane axes.'
     if text.startswith(prefix) and text.endswith(suffix):
         return HEBREW_TRANSLATIONS[prefix] + text[len(prefix):-len(suffix)] + HEBREW_TRANSLATIONS[suffix]
@@ -264,6 +304,12 @@ HEBREW_TRANSLATIONS.update({
     'Invalid settings were not saved. The previous saved values were kept.':
         'ההגדרות הלא תקינות לא נשמרו. הערכים שנשמרו קודם נשארו ללא שינוי.',
     'Settings need correction before processing.':'יש לתקן את ההגדרות לפני העיבוד.',
+    'Straight corridor search': 'חיפוש מסדרון ישר',
+    'Initial search window end': 'קצה חלון החיפוש הראשון',
+    'Window shift left / up': 'הזזת חלון שמאלה / למעלה',
+    'Window shift right / down': 'הזזת חלון ימינה / למטה',
+    'Automatic': 'אוטומטי',
+    'Automatic or {range}': 'אוטומטי או {range}',
 })
 
 HEBREW_TRANSLATIONS.update({

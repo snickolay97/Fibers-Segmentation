@@ -1,8 +1,9 @@
 """Scientific parameter explanations and compact hover-help controls."""
 
-from .i18n import get_language
+from .i18n import get_language, tr
 from .hebrew import HELP_HEBREW
-from .qt import QtCore, QtWidgets
+from .qt import QtCore, QtGui, QtWidgets
+from .view_help_topics import TOPIC_TEXT
 
 
 _HELP = {
@@ -27,6 +28,15 @@ _HELP = {
     "target_size": (
         "Width and height of the square model PNG, in pixels. Large protected objects stay whole and may be reduced to fit; native crops and scale metadata remain available for measurement.",
         "Ширина и высота квадратного модельного PNG в пикселях. Крупные защищённые объекты сохраняются целиком и могут уменьшаться; native-фрагменты и масштаб остаются для измерений."),
+    "search_window_end": (
+        "Exclusive end of the initial search window in source pixels. Automatic uses floor(0.975 × tile size). For a 1500 px tile, 1400 leaves up to 100 px for right/down shifts.",
+        "Правая или нижняя граница первого окна в исходных пикселях, не включая саму границу. В автоматическом режиме это floor(0,975 × размер тайла). При тайле 1500 и границе 1400 возможен сдвиг вправо или вниз до 100 px."),
+    "straight_shift_left": (
+        "Maximum left/up shift of the straight-corridor window, in source pixels. Automatic uses the original search. Zero disables shifts on this side.",
+        "Предел сдвига окна прямого коридора влево или вверх в исходных пикселях. Автоматический режим использует прежний поиск. Ноль отключает сдвиги в эту сторону."),
+    "straight_shift_right": (
+        "Maximum right/down shift of the straight-corridor window, in source pixels. Zero disables shifts on this side. Dijkstra runs in the first window.",
+        "Предел сдвига окна прямого коридора вправо или вниз в исходных пикселях. Ноль отключает сдвиги в эту сторону. Дейкстра работает в первом окне."),
     "overview_size": (
         "Maximum side of the overview image. It affects display resolution, not tile ownership or measurement scale. Larger overviews require more disk space and preview memory.",
         "Максимальная сторона обзорной карты. Влияет на её разрешение, а не на принадлежность пикселей или масштаб измерений. Большая карта требует больше места и памяти."),
@@ -105,10 +115,8 @@ _HELP = {
     "labels_mode": (
         "Existing only: measure available annotations. Require all: every active tile needs a TXT. Automatic fallback: missing TXT files use detected contours with Unknown source class. An empty TXT always means no annotated objects, not a request for automatic detection.",
         "Только разметка: измерять имеющиеся полигоны. Требовать все: TXT нужен каждому активному тайлу. Автоматическое выделение: при отсутствующем TXT использовать контуры с исходным классом Unknown. Пустой TXT всегда означает отсутствие размеченных объектов."),
-    "image_viewer": ("Drag to pan; use the mouse wheel or +/− to zoom. Double-click or press F11 to open a separate full-screen view; Esc closes it. The image is a bounded preview; measurements use native pixels.",
-                     "Перетаскивайте для панорамирования; колесо и +/− меняют масштаб. Двойной щелчок или F11 открывает отдельный полный экран, Esc закрывает его. Показан уменьшенный предпросмотр; измерения используют native-пиксели."),
-    "image_fullscreen": ("Open the loaded image in a separate full-screen window with the same polygons and original-pixel click coordinates. Pan, zoom and fit work independently of the original pane. Use double-click or F11 to open, and Esc or F11 to close. Changing the source image closes the window.",
-                         "Открывает загруженное изображение в отдельном полноэкранном окне с теми же полигонами и координатами исходных пикселей. Масштаб, панорамирование и вписывание работают независимо от исходной панели. Открытие — двойной щелчок или F11, закрытие — Esc или F11. При смене изображения окно закрывается."),
+    "image_viewer": ("Press the mouse wheel and drag to pan. Scroll the wheel or use +/− to zoom. Double-click opens a resizable window. F11 opens full screen.",
+                     "Зажмите колёсико и перетаскивайте изображение. Прокрутка колёсика и +/− меняют масштаб. Двойной щелчок открывает отдельное окно с изменяемым размером, F11 разворачивает на весь экран."),
     "image_zoom": ("Zoom the preview without changing image files or measurement scale.", "Изменяет масштаб просмотра, не меняя файлы и масштаб измерений."),
     "image_fit": ("Fit the entire preview into the available window.", "Показывает предпросмотр целиком в доступном окне."),
     "result_search": ("Search displayed feature rows by tile or object. Filtered export includes only visible rows; training export follows its own classification selection.",
@@ -124,6 +132,121 @@ _HELP = {
 }
 
 
+_HELP.update({
+    'image_original': (
+        'Open the saved image in a separate original-resolution window. Actual pixels 1:1 displays saved pixels without preview downscaling. Images over 32 MP open in the system viewer. A reduced saved map cannot recover detail; use Detailed boundary map for a source-resolution map.',
+        'Открыть сохранённый файл отдельно в исходном разрешении. Режим исходных пикселей 1:1 не уменьшает предпросмотр. Изображения больше 32 Мп открываются системным просмотрщиком. Уменьшенная карта не вернёт детали; используйте «Подробная карта границ».'),
+    'detailed_map': (
+        'Reconstruct and save a separate PNG with source image dimensions and the current active-tile boundaries, then open it at original resolution. Requires additional time, memory and disk space. Measurements and slicing are unchanged; excluded tiles remain excluded.',
+        'Восстановить и сохранить отдельный PNG с размерами исходника и границами активных тайлов, затем открыть в исходном разрешении. Требует времени, памяти и места. Измерения и нарезка не меняются; исключённые тайлы остаются исключёнными.'),
+    'result_tile': (
+        'Open the full tile belonging to the selected gallery object or feature-table row. Prefer native source pixels; missing native falls back to a clearly labelled model canvas. The current CSV has no object coordinates, so the object position is not highlighted. This only changes the view.',
+        'Открыть весь тайл объекта, выбранного в галерее или таблице. Предпочтителен native-фрагмент; при его отсутствии используется подписанный модельный тайл. В текущем CSV нет координат объекта, поэтому его позиция не подсвечивается. Меняется только просмотр.'),
+})
+
+
+_HELP.update({
+    'plane': (
+        'Zero-based slice/frame in a Z-depth, time T or image I stack, separate from channel. For example, 3 chooses the fourth slice. A plain 2D or RGB TIFF has one plane: 0 is read-only. No projection or stack merging is performed.',
+        'Срез/кадр в стеке глубины Z, времени T или изображений I, начиная с 0, отдельно от канала. Например, 3 выбирает четвёртый срез. Для обычного 2D или RGB TIFF плоскость одна: 0 доступен только для чтения. Проекция и объединение не выполняются.'),
+    'pixel_size_um': (
+        'From TIFF metadata reads supported equal X/Y physical pixel sizes separately for each source and displays the selected value read-only. Manual/source pixels uses one entered µm/px scale for the batch; 0 keeps pixels. Missing units, unequal X/Y, print DPI and magnification are not automatic calibration. Area_um2 = native Area × scale²; AR stays dimensionless.',
+        'Из TIFF читается поддерживаемый одинаковый физический размер X/Y каждого исходника; значение выбранного файла доступно только для чтения. Ручной режим задаёт один масштаб мкм/px пакету; 0 оставляет пиксели. Неизвестные единицы, разные X/Y, DPI печати и увеличение не служат автоматической калибровкой. Area_um2 = native Area × масштаб²; AR безразмерен.'),
+    'source_selection': (
+        'Checked TIFF rows choose the processing batch. The Preparation TIFF selector or selected Sources row chooses the whole image for preview, without changing the checkboxes. Check that every source supports the selected channel and slice/frame.',
+        'Галочки TIFF выбирают пакет обработки. Список TIFF в «Подготовке» или выделенная строка «Исходников» выбирает всё изображение предпросмотра, не меняя галочки. Канал и срез/кадр должны существовать в каждом исходнике.'),
+})
+HELP_HEBREW.update({
+    'plane': 'חתך/פריים מ־0 בערימת עומק Z, זמן T או תמונות I, בנפרד מהערוץ. לדוגמה, 3 בוחר את החתך הרביעי. ב־TIFF רגיל דו־ממדי או RGB יש מישור אחד: 0 לקריאה בלבד. אין הטלה או מיזוג ערימה.',
+    'pixel_size_um': 'מטא־נתוני TIFF מספקים גודל פיקסל פיזי נתמך וזהה ב־X/Y לכל מקור בנפרד; הערך הנבחר לקריאה בלבד. מצב ידני משתמש בכיול מיקרומטר לפיקסל אחד לאצווה; 0 שומר פיקסלים. יחידות חסרות, X/Y שונים, DPI הדפסה והגדלת עדשה אינם כיול אוטומטי. Area_um2 שווה לשטח המקורי כפול הכיול בריבוע; AR חסר ממד.',
+    'source_selection': 'שורות TIFF מסומנות בוחרות את אצוות העיבוד. בורר TIFF בהכנה או השורה הנבחרת במקורות בוחרים את כל התמונה לתצוגה ללא שינוי תיבות הסימון. הערוץ והחתך/פריים הנבחרים חייבים להתקיים בכל מקור.',
+})
+
+
+for key, english, russian, hebrew in (
+    ('evaluation_gallery', 'Inspect masks and labels in training, validation folds and the held-out test.',
+     'Посмотрите маски и классы в обучении, проверочных фолдах и отложенном тесте.',
+     'עיינו במסכות ובמחלקות באימון, בקפלי התיקוף ובבדיקה השמורה.'),
+    ('object_prediction_review', 'Apply a saved tree or forest to measured masks without manual classes, then review the predictions.',
+     'Примените сохранённое дерево или лес к измеренным маскам без ручных классов и проверьте прогнозы.',
+     'הפעילו עץ או יער שמור על מסכות מדודות ללא מחלקות ידניות ובדקו את התחזיות.'),
+    ('confusion_matrix', 'Read test counts by reviewed class in the rows and by prediction in the columns.',
+     'Читайте тестовые числа по ручным классам в строках и по прогнозам в столбцах.',
+     'קראו את ספירות הבדיקה לפי המחלקה הידנית בשורות ולפי התחזית בעמודות.'),
+    ('model_fit', 'See how depth limits are selected and check fitted depth, tree count and time.',
+     'Узнайте, как выбирается предел глубины, и проверьте фактическую глубину, число деревьев и время.',
+     'ראו איך נבחרת מגבלת העומק ובדקו עומק בפועל, מספר עצים וזמן אימון.'),
+    ('tree_impurity', 'See how a tree uses Gini or entropy to separate the classes.',
+     'Посмотрите, как дерево использует Gini или энтропию для разделения классов.',
+     'ראו איך העץ משתמש בג׳יני או באנטרופיה כדי להפריד מחלקות.'),
+    ('image_ruler', 'Drag a straight ruler or choose Polyline ruler from its menu. Double-click or press Enter to finish the polyline. Right-click a segment to color it.',
+     'Проведите прямую линейку или выберите ломаную в меню. Двойной щелчок или Enter завершает ломаную. Правый щелчок меняет цвет отрезка.',
+     'גררו סרגל ישר או בחרו סרגל קו שבור בתפריט. לחיצה כפולה או Enter מסיימים. לחיצה ימנית משנה את צבע המקטע.'),
+    ('image_contour', 'The preview edge follows the pointer. Double-click or press Enter to close the contour. Its menu sets color and width. Ctrl+Z undoes one edit.',
+     'Линия предпросмотра следует за курсором. Двойной щелчок или Enter замыкает контур. В меню можно задать цвет и толщину. Ctrl+Z отменяет правку.',
+     'צלע התצוגה עוקבת אחרי הסמן. לחיצה כפולה או Enter סוגרים את המתאר. בתפריט אפשר לקבוע צבע ועובי. Ctrl+Z מבטל עריכה אחת.'),
+    ('image_comparison', 'Open a large comparison or choose a file. Matching image dimensions enable an overlay with adjustable opacity.',
+     'Откройте большое окно сравнения или выберите файл. При совпадающих размерах доступно наложение с регулируемой непрозрачностью.',
+     'פתחו חלון השוואה גדול או בחרו קובץ. מידות זהות מאפשרות חפיפה עם אטימות מתכווננת.'),
+    ('image_levels', 'Set brightness, contrast and black/white levels for the display. Reset restores the initial view.',
+     'Настройте яркость, контраст и уровни чёрного и белого для просмотра. Сброс вернёт исходный вид.',
+     'כוונו בהירות, ניגודיות ורמות שחור ולבן לתצוגה. איפוס מחזיר את התצוגה ההתחלתית.'),
+    ('image_export', 'Save displayed pixels or export the saved file as TIFF, PNG or JPEG.',
+     'Сохраните изображение с настройками просмотра или экспортируйте сохранённый файл в TIFF, PNG или JPEG.',
+     'שמרו את הפיקסלים המוצגים או ייצאו את הקובץ השמור כ־TIFF, PNG או JPEG.'),
+    ('editor_cursor', 'Choose a crosshair, dot, arrow or precision target for the drawing tools.',
+     'Выберите крест, точку, стрелку или прицел для инструментов рисования.',
+     'בחרו צלב, נקודה, חץ או כוונת לכלי הציור.'),
+    ('pixel_segmentation', 'Train a pixel forest from exact reviewed masks or apply a saved model to an active native tile.',
+     'Обучите пиксельный лес на точных проверенных масках или примените сохранённую модель к активному native-тайлу.',
+     'אמנו יער פיקסלים ממסכות מדויקות שנסקרו או החילו מודל שמור על אריח מקור פעיל.'),
+    ("result_tile", "Open the selected object's tile with its measured mask, ID and frame. Toggle Highlight object to compare. Old results need a unique exact crop match or recalculation.", "Открыть тайл с маской, ID и рамкой выбранного объекта. Флажок «Подсветить объект» позволяет сравнить с исходником. Для старых результатов нужно единственное точное совпадение фрагмента или пересчёт.", "פתיחת האריח עם מסכת העצם שנבחר, מזהה ומסגרת. תיבת ההדגשה מאפשרת השוואה. תוצאות ישנות דורשות התאמה מדויקת ויחידה או חישוב מחדש."),
+    ("tile_editor", "Cut, erase, remove local background or draw a rectangle for gamma. Save tile selects the edited version for the next measurement. Recalculate and review objects before training.", "Отсеките сторону, сотрите участок, удалите локальный фон или выделите прямоугольник для гаммы. «Сохранить тайл» выбирает правку для следующего измерения. Перед обучением пересчитайте признаки и проверьте объекты.", "חתכו צד, מחקו אזור, הסירו רקע מקומי או בחרו מלבן לגאמה. שמירת האריח בוחרת את הגרסה הערוכה למדידה הבאה. לפני אימון חשבו מחדש את התכונות ובדקו את העצמים."),
+    ("import_yolo", "Copy matching YOLO polygon TXT files into this project.", "Скопировать подходящие TXT с полигонами YOLO в проект.", "העתקת קובצי TXT תואמים עם מצולעי YOLO לפרויקט."),
+    ("check_yolo", "Count annotated, empty, missing and invalid files for active tiles.", "Проверить разметку активных тайлов и посчитать пустые, отсутствующие и ошибочные TXT.", "ספירת תיוגים וקובצי TXT ריקים, חסרים ושגויים לאריחים פעילים."),
+    ("open_yolo", "Open the imported annotation copy in Explorer.", "Открыть импортированную копию разметки в Проводнике.", "פתיחת תיקיית עותק התיוג שיובא לפרויקט בסייר Windows."),
+    ("measure_objects", "Create a new measurement using the selected mode and thresholds.", "Создать новое измерение с выбранным режимом и порогами.", "יצירת מדידה חדשה במצב ובספים שנבחרו."),
+    ("detect_fallback", "Use existing TXT files and search automatically only on tiles with missing TXT.", "Использовать имеющиеся TXT и искать автоматически только на тайлах без TXT.", "שימוש בקובצי TXT קיימים וזיהוי אוטומטי רק באריחים שחסר להם TXT."),
+    ("open_measurements", "Open Object labeling without starting a new measurement.", "Открыть разметку объектов без нового измерения.", "פתיחת תיוג אובייקטים ללא הפעלה של מדידה חדשה."),
+    ("excel_export", "Save the full current measurement table as an Excel workbook.", "Сохранить всю актуальную таблицу измерений в Excel.", "שמירת טבלת המדידות העדכנית המלאה בחוברת Excel."),
+    ("ml_bundle", "Save manually typed objects with predictors, targets and metadata in separate CSV files inside a ZIP.", "Сохранить объекты с ручным типом, разделив признаки, цели и метаданные по CSV внутри ZIP.", "שמירת עצמים שסווגו ידנית עם תכונות, יעדים ומטא־נתונים בקובצי CSV נפרדים ב־ZIP."),
+    ("feature_statistics", "Drag to pan, scroll to zoom, and move the divider to resize the chart. Use Chart colors to change its appearance.",
+     "Перетаскивайте график для панорамирования, используйте колесо для масштаба и разделитель для размера. Цвет меняется в меню «Цвета графика».",
+     "גררו להזזה, גלגלו לזום וגררו את המפריד לשינוי גודל התרשים. צבעי התרשים משנים את המראה."),
+):
+    _HELP[key] = (english, russian)
+    HELP_HEBREW[key] = hebrew
+
+
+for key, english, russian, hebrew in (
+    ('image_fullscreen', 'Open a resizable image window or maximize the current image window. The same action bar is available in all views. F11 switches to full screen.',
+     'Откройте отдельное окно изображения или разверните текущее окно. Во всех режимах доступна одна панель действий. F11 включает полноэкранный режим.',
+     'פתחו חלון תמונה נפרד או הגדילו את החלון הנוכחי. בכל התצוגות זמין אותו סרגל פעולות. F11 עובר למסך מלא.'),
+    ('black_tiles','Exclude tiles only when every valid native pixel is zero. Restore remembers your manual inclusion. EXCLUDED marks these tiles on the map.',
+     'Исключать тайлы только при нулевых действительных native-пикселях. «Вернуть» запоминает ручное включение. На карте такие тайлы подписаны EXCLUDED.',
+     'החרגת אריחים רק כאשר כל פיקסלי המקור התקפים הם אפס. שחזור זוכר את ההכללה הידנית. אריחים אלה מסומנים במפה EXCLUDED.'),
+    ('segmentation_review', 'Browse native/model tiles and exact measured masks. Click parts or check IDs to select them.',
+     'Просматривайте native/model-тайлы и точные измеренные маски. Выбирайте части щелчком или галочкой у номера.',
+     'עיינו באריחי מקור ומודל ובמסכות מדידה מדויקות. בחרו חלקים בלחיצה או בסימון מספרים.'),
+    ('mask_correction','Preview connections between ends or paint/erase a selected mask. Save one connected native mask in a new version; tile intensities stay unchanged.',
+     'Проверьте соединение концов или дорисуйте/сотрите часть выбранной маски. Сохраните одну связную native-маску в новой версии; яркости тайла сохраняются.',
+     'בדקו חיבור קצוות או הוסיפו/מחקו במסכה נבחרת. שמרו מסכת מקור קשירה אחת בגרסה חדשה; עוצמות האריח נשמרות.'),
+    ('delete_masks','Remove selected noise masks from a new results version. Undo last mask change restores the complete parent.',
+     'Удалите выбранные маски шума в новой версии результатов. Отмена изменения масок возвращает родительскую версию целиком.',
+     'הסירו מסכות רעש נבחרות בגרסת תוצאות חדשה. ביטול שינוי המסכות האחרון משחזר את גרסת האב המלאה.'),
+    ('merge_objects', 'Merge at least two selected masks from one tile. Features are recalculated in a new measurement version. Undo restores its parent.',
+     'Объединить минимум две выбранные маски одного тайла. Признаки пересчитываются в новой версии измерений. Отмена возвращает родительскую версию.',
+     'אחדו לפחות שתי מסכות שנבחרו מאריח אחד. התכונות מחושבות מחדש בגרסת מדידה חדשה. ביטול משחזר את גרסת האב.'),
+):
+    _HELP[key] = (english, russian)
+    HELP_HEBREW[key] = hebrew
+
+
+for _key, (_title, _first, *_extra) in TOPIC_TEXT.items():
+    _HELP[_key] = _first[:2]
+    HELP_HEBREW[_key] = _first[2]
+
+
 def help_text(key, language=None):
     language = language or get_language()
     if language == 'he':
@@ -135,6 +258,8 @@ def help_text(key, language=None):
 
 
 def attach_help(widget, key):
+    # The same stable key routes F1 and the clickable badge to detailed help.
+    # Tooltip text is only the localized summary for the current widget.
     widget.setToolTip(help_text(key))
     widget.setWhatsThis(help_text(key))
     widget.setProperty("helpKey", key)
@@ -149,3 +274,49 @@ def help_label(key):
     label.setCursor(QtCore.Qt.CursorShape.WhatsThisCursor)
     attach_help(label, key)
     return label
+
+
+def _show_image_help(widget, key, language):
+    window = widget.window()
+    current = widget
+    while current is not None and not (isinstance(window, QtWidgets.QDialog) and window.isModal()):
+        if hasattr(current, 'show_help'):
+            current.show_help(key)
+            return
+        current = current.parentWidget()
+    # A child help window stays usable when opened from a modal mask editor.
+    from .help_center import HelpCenter
+    help_window = getattr(window, '_image_help_window', None)
+    if help_window is None:
+        help_window = window._image_help_window = HelpCenter(parent=window, language=language)
+    help_window.open_topic(key)
+    help_window.show()
+    help_window.raise_()
+    help_window.activateWindow()
+
+
+def image_help_button(parent, key, language):
+    button = QtWidgets.QToolButton(parent)
+    button.setText('?')
+    button.setAccessibleName(tr('Open help', language=language))
+    button.clicked.connect(lambda: _show_image_help(button, button.property('helpKey'), language))
+    return attach_help(button, key)
+
+
+def install_image_help(window, fallback, language):
+    shortcut = QtGui.QShortcut(QtGui.QKeySequence('F1'), window)
+
+    def show():
+        focus = QtWidgets.QApplication.focusWidget()
+        while focus is not None:
+            key = focus.property('helpKey')
+            if key:
+                _show_image_help(window, key, language)
+                return
+            if focus is window:
+                break
+            focus = focus.parentWidget()
+        _show_image_help(window, fallback, language)
+
+    shortcut.activated.connect(show)
+    return shortcut

@@ -71,6 +71,9 @@ class ManualWorkflowTests(unittest.TestCase):
                 dataset = window.selected_dataset()
                 source_csv = Path(dataset['last_csv'])
                 before = source_csv.read_bytes()
+                # Object labeling is a distinct stage before training and Results.
+                window.sidebar.setCurrentRow(4)
+                self.assertEqual(window.page_title.text(), 'Object labeling')
                 self.assertGreaterEqual(len(window.results_table.rows), 6)
                 window.results_table.table.selectRow(0)
                 for expected, definition in enumerate(CANONICAL_MANUAL_CLASSES, 1):
@@ -101,12 +104,12 @@ class ManualWorkflowTests(unittest.TestCase):
 
                 chosen = window.results_table.selected_row()
                 window.set_language('ru')
-                self.assertEqual(window.page_title.text(), 'Результаты')
+                self.assertEqual(window.page_title.text(), 'Разметка объектов')
                 self.assertEqual(window.results_table.selected_row()['Object_ID'], chosen['Object_ID'])
                 self.assertEqual(service.get_object_labels(window.selected_dataset())['assigned'], 6)
                 self.assertEqual(preferences.value('language'), 'ru')
                 window.set_language('en')
-                self.assertEqual(window.page_title.text(), 'Results')
+                self.assertEqual(window.page_title.text(), 'Object labeling')
 
                 # A second preparation version must be selectable and distinguishable.
                 settings['gamma'] = 1.3
@@ -125,6 +128,8 @@ class ManualWorkflowTests(unittest.TestCase):
                 window.close()
                 image_pool().waitForDone(5000)
                 self.app.processEvents()
+                window.deleteLater()
+                QtCore.QCoreApplication.sendPostedEvents(window, QtCore.QEvent.Type.DeferredDelete)
 
             reopened = MainWindow(Project.load(project.path), preferences=preferences)
             try:
@@ -136,6 +141,8 @@ class ManualWorkflowTests(unittest.TestCase):
                 reopened.close()
                 image_pool().waitForDone(5000)
                 self.app.processEvents()
+                reopened.deleteLater()
+                QtCore.QCoreApplication.sendPostedEvents(reopened, QtCore.QEvent.Type.DeferredDelete)
 
 
 if __name__ == '__main__':

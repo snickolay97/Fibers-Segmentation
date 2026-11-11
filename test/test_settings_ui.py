@@ -120,6 +120,54 @@ class SettingsUiTests(unittest.TestCase):
         self.assertEqual(saved['target_size'], 16)
         self.assertEqual(saved['buffer_kernel_size'], 151)
 
+    def test_straight_search_sliders_roundtrip_and_validate_against_tile_size(self):
+        window = self.window(language='he')
+        fields = window._settings_fields
+        left = window._straight_shift_sliders['straight_shift_left']
+        right = window._straight_shift_sliders['straight_shift_right']
+        self.assertEqual((left.maximum(), right.maximum()), (750, 38))
+        self.assertEqual(left.layoutDirection(), QtCore.Qt.LayoutDirection.LeftToRight)
+        self.assertEqual(left.value(), 750)
+        self.assertIsNone(window.collect_settings()['straight_shift_left'])
+        left.setValue(21)
+        fields['straight_shift_right'].setValue(12)
+        self.assertEqual(right.value(), 12)
+        self.assertEqual(fields['straight_shift_left'].value(), 21)
+        self.assertEqual(left.property('helpKey'), 'straight_shift_left')
+        self.assertEqual(right.property('helpKey'), 'straight_shift_right')
+        fields['target_size'].setValue(200)
+        self.assertEqual((left.maximum(), right.maximum()), (100, 5))
+        self.assertEqual(window.collect_settings()['straight_shift_right'], 12)
+        self.assertFalse(window.save_button.isEnabled())
+        right.setValue(4)
+        self.assertTrue(window.save_button.isEnabled())
+        window.save_project()
+        saved = Project.load(self.project.path).settings
+        self.assertEqual((saved['straight_shift_left'], saved['straight_shift_right']), (21, 4))
+        window.restore_factory_settings()
+        self.assertIsNone(window.collect_settings()['straight_shift_left'])
+        self.assertEqual((left.value(), right.value()), (750, 0))
+
+    def test_window_end_refreshes_slider_and_keeps_invalid_draft_visible(self):
+        window = self.window(language='ru')
+        end = window._settings_fields['search_window_end']
+        right = window._straight_shift_sliders['straight_shift_right']
+        self.assertEqual(end.property('helpKey'), 'search_window_end')
+        self.assertIsNone(window.collect_settings()['search_window_end'])
+        end.setValue(1400)
+        self.assertEqual(right.maximum(), 100)
+        right.setValue(100)
+        window.save_project()
+        saved = Project.load(self.project.path).settings
+        self.assertEqual((saved['search_window_end'], saved['straight_shift_right']), (1400, 100))
+        end.setValue(1462)
+        self.assertEqual(right.maximum(), 38)
+        self.assertEqual(window.collect_settings()['straight_shift_right'], 100)
+        self.assertFalse(window.save_button.isEnabled())
+        window.restore_factory_settings()
+        self.assertIsNone(window.collect_settings()['search_window_end'])
+        self.assertEqual((right.maximum(), right.value()), (38, 0))
+
     def test_adding_a_source_keeps_unsaved_draft_but_saves_only_valid_settings(self):
         import numpy as np
         import tifffile
@@ -130,6 +178,14 @@ class SettingsUiTests(unittest.TestCase):
         window._settings_fields['buffer_kernel_size'].setValue(6)
         with patch.object(QtWidgets.QFileDialog, 'getOpenFileNames', return_value=([str(source)], 'TIFF')):
             window.add_sources()
+        self.assertIsNotNone(window.process)
+        timer = QtCore.QElapsedTimer()
+        timer.start()
+        while window.process is not None and timer.elapsed() < 20000:
+            self.app.processEvents()
+            QtTest.QTest.qWait(10)
+        self.assertIsNone(window.process, 'TIFF import worker did not finish')
+        self.assertIsNone(window._job_error)
         self.assertEqual(window.collect_settings()['gamma'], 1.8)
         self.assertEqual(window.collect_settings()['buffer_kernel_size'], 6)
         saved = Project.load(self.project.path)

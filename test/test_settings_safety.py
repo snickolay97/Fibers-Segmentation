@@ -41,9 +41,12 @@ class SettingsSafetyTests(unittest.TestCase):
     def test_factory_defaults_are_immutable_complete_and_independent_copies(self):
         self.assertEqual(set(FACTORY_DEFAULTS),{field.name for field in fields(PipelineSettings)})
         self.assertEqual(factory_defaults(),PipelineSettings().to_dict())
-        self.assertEqual(DEFAULTS_VERSION,1)
+        self.assertEqual(DEFAULTS_VERSION,3)
         self.assertEqual(FACTORY_DEFAULTS['gamma'],1.2)
         self.assertEqual(FACTORY_DEFAULTS['buffer_kernel_size'],5)
+        self.assertIsNone(FACTORY_DEFAULTS['straight_shift_left'])
+        self.assertIsNone(FACTORY_DEFAULTS['search_window_end'])
+        self.assertEqual(FACTORY_DEFAULTS['straight_shift_right'], 0)
         with self.assertRaises(TypeError):FACTORY_DEFAULTS['gamma']=1.6
         editable=factory_defaults(); editable['gamma']=9
         self.assertEqual(factory_defaults()['gamma'],1.2)

@@ -19,13 +19,13 @@ from src.desktop.project import Project, atomic_json
 from src.desktop.main_window import MainWindow
 from src.desktop.help_center import TOPICS
 from src.desktop.widgets import image_pool
+from src.desktop.storage_names import new_version
 
 
 def main():
     if hasattr(sys.stdout, 'reconfigure'):
         sys.stdout.reconfigure(encoding='utf-8')
-    output = ROOT/'data/app_preview/help_recovery_20261029'
-    output.mkdir(parents=True, exist_ok=True)
+    output = new_version(ROOT/'data/validation', 'Help_recovery')
     app = QtWidgets.QApplication([])
     stats = dict(defaults_version=DEFAULTS_VERSION, parameter_count=len(FACTORY_DEFAULTS),
                  application_topics=len(TOPICS), languages=['en', 'ru', 'he'])
@@ -35,6 +35,8 @@ def main():
         damaged = project.to_dict()
         damaged['settings'].update(buffer_kernel_size=6, gamma=1.6)
         atomic_json(project.path, damaged)
+        # Compare exact bytes, so the check covers the original invalid value
+        # and verifies that the backup was not generated from repaired state.
         broken_bytes = Path(project.path).read_bytes()
         preferences = QtCore.QSettings(str(base/'preferences.ini'), QtCore.QSettings.Format.IniFormat)
         window = MainWindow(Project.load(project.path), preferences=preferences)

@@ -68,12 +68,22 @@ class FeatureSafetyTests(unittest.TestCase):
             dataset, labels, output, _ = self.make_dataset(Path(work))
             first = self.extractor(dataset, labels, output).execute()
             self.assertEqual(first['objects'], 1)
-            self.assertEqual(len(list((output/'verification_masks').rglob('*.png'))),1)
+            verification = output/'verification_masks'
+            locations = json.loads((verification/'object_locations.json').read_text(encoding='utf-8'))
+            self.assertEqual(len(locations['objects']), 1)
+            location = locations['objects'][0]
+            exact = cv2.imread(str(verification/location['mask']), cv2.IMREAD_GRAYSCALE)
+            self.assertIsNotNone(exact)
+            row = pd.read_csv(first['csv_path']).iloc[0]
+            self.assertEqual(location['tile_name'], row['Tile_Name'])
+            self.assertEqual(location['object_id'], row['Object_ID'])
+            self.assertEqual(np.count_nonzero(exact), row['Area'])
             (labels/'sample_tile_0001.txt').write_text('')
             second = self.extractor(dataset, labels, output, labels_mode='require_annotations').execute()
             self.assertEqual(second['objects'], 0)
             self.assertEqual(len(pd.read_csv(second['csv_path'])),0)
-            self.assertEqual(list((output/'verification_masks').rglob('*')),[])
+            self.assertEqual(list(verification.rglob('*.png')), [])
+            self.assertEqual(json.loads((verification/'object_locations.json').read_text(encoding='utf-8'))['objects'], [])
 
     def test_annotations_only_skips_missing_and_require_rejects(self):
         with tempfile.TemporaryDirectory() as work:
@@ -105,13 +115,18 @@ class FeatureSafetyTests(unittest.TestCase):
             dataset, labels, output, _ = self.make_dataset(Path(work))
             result = self.extractor(dataset, labels, output).execute()
             previous = Path(result['csv_path']).read_bytes()
+            verification = output/'verification_masks'
+            previous_bundle = {path.relative_to(verification): path.read_bytes()
+                               for path in verification.rglob('*') if path.is_file()}
             (labels/'sample_tile_0001.txt').write_text('')
             stop = [False]
             def progress(event): stop[0] = True
             with self.assertRaises(PipelineCancelled):
                 self.extractor(dataset, labels, output, progress=progress, cancelled=lambda:stop[0]).execute()
             self.assertEqual(Path(result['csv_path']).read_bytes(), previous)
-            self.assertEqual(len(list((output/'verification_masks').rglob('*.png'))),1)
+            current_bundle = {path.relative_to(verification): path.read_bytes()
+                              for path in verification.rglob('*') if path.is_file()}
+            self.assertEqual(current_bundle, previous_bundle)
             self.assertEqual(list(output.glob('.features_*')),[])
 
     def test_missing_manifest_native_dataset_is_never_legacy(self):

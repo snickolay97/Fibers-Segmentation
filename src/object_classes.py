@@ -5,6 +5,8 @@ CSV keys can differ from the original names without changing their meaning.
 Catalog 2 adds adhered objects and aligns manual IDs with the YOLO IDs.
 """
 
+# id and key are stable persisted values. The source label represents the
+# historical YOLO name, while the display labels may vary with the UI language.
 CLASS_CATALOG_VERSION = 2
 
 OBJECT_CLASS_CATALOG = (

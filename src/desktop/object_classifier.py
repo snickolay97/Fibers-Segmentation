@@ -237,6 +237,8 @@ class ObjectClassifier(QtWidgets.QWidget):
         self._update_state()
 
     def _update_state(self):
+        # Stale measurements may still be browsable. The current flag gates
+        # every labeling control and shortcut before it can emit a mutation.
         enabled = self._current and self._row is not None
         for widget in (self.class_combo, self.save_button, self.save_next_button):
             widget.setEnabled(enabled)
@@ -266,6 +268,7 @@ class ObjectClassifier(QtWidgets.QWidget):
         self._update_shortcuts()
 
     def _arrange_classes(self):
+        # Reflow buttons in narrow docks while retaining catalog and key order.
         columns = 3 if self.width() >= 480 else 2
         if columns != self._class_columns:
             while self.class_grid.count():
