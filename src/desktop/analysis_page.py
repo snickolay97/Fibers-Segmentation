@@ -61,6 +61,15 @@ class AnalysisPage(QtWidgets.QWidget):
             self._plot.show()
         self._dirty = False
 
+    def update_manual_label(self, report, key, label):
+        """Keep the numerical snapshot; only targets and chart invalidation change."""
+        self._labels, self._dirty = report, True
+        self.table.update_manual_label(key, label)
+        count, labeled = len(self._rows), report.get('assigned', 0)
+        self.summary.setText(tr('Objects: {objects} · Labeled: {labeled} · Unlabeled: {unlabeled}',
+                                objects=count, labeled=labeled, unlabeled=count-labeled))
+        self.ensure_plot()
+
     def _create_chart(self):
         from .result_statistics import StatisticsDialog
 

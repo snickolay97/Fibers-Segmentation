@@ -21,6 +21,7 @@ __pycache__/
 venv/
 .env
 .env.*
+/local_runtime.json
 
 # Local scientific audits, derived examples and transcripts stay on this machine.
 /docs/*

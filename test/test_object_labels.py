@@ -8,7 +8,8 @@ from pathlib import Path
 from src.desktop.project import Project, atomic_json
 from src.desktop import service
 from src.desktop.object_labels import (CANONICAL_MANUAL_CLASSES, LABELS_FILENAME,
-                                       object_key, validate_export_destination)
+                                       object_key, validate_export_destination, export_label_snapshot)
+from src.desktop.label_database import DATABASE_FILENAME, STORAGE_FILENAME
 
 
 class ObjectLabelsTests(unittest.TestCase):
@@ -61,6 +62,17 @@ class ObjectLabelsTests(unittest.TestCase):
         with Path(path).open(newline='',encoding='utf-8') as handle:
             reader=csv.DictReader(handle)
             return list(reader.fieldnames),list(reader)
+
+    def legacy_fixture(self):
+        """Create an actual old-format project, not JSON bytes inside a SQL file."""
+        exported = self.root/'legacy_snapshot.json'
+        export_label_snapshot(self.dataset, exported)
+        output = Path(self.dataset['results_dir'])
+        (output/DATABASE_FILENAME).unlink()
+        (output/STORAGE_FILENAME).unlink()
+        path = output/LABELS_FILENAME
+        path.write_bytes(exported.read_bytes())
+        return path
 
     def test_canonical_classes_have_stable_ids_and_localization(self):
         self.assertEqual([(c['id'],c['key']) for c in CANONICAL_MANUAL_CLASSES],
@@ -175,9 +187,9 @@ class ObjectLabelsTests(unittest.TestCase):
     def test_copied_labels_or_changed_feature_csv_are_not_retargeted(self):
         old_report=self.assign(); old_path=Path(old_report['path'])
         output=self.new_measurement('second')
-        shutil.copy2(old_path,output/LABELS_FILENAME)
+        shutil.copy2(old_path,output/DATABASE_FILENAME)
         with self.assertRaises(ValueError):service.get_object_labels(self.dataset)
-        (output/LABELS_FILENAME).unlink()
+        (output/DATABASE_FILENAME).unlink()
         self.assign()
         source=Path(self.dataset['last_csv'])
         source.write_text(source.read_text().replace('100','999'))
@@ -270,7 +282,7 @@ class ObjectLabelsTests(unittest.TestCase):
     def test_legacy_catalog_migrates_by_semantic_key_without_readonly_write(self):
         report=self.assign(key='agglomeration')
         self.assign(ident=2,key='self_crossed_tube')
-        path=Path(report['path'])
+        path=self.legacy_fixture()
         legacy=json.loads(path.read_text())
         legacy['class_catalog_version']=1
         legacy['labels'][object_key('sample_tile_0001',1)]['Manual_Class_ID']=2
@@ -292,7 +304,10 @@ class ObjectLabelsTests(unittest.TestCase):
         self.assertEqual(exported['class_catalog_version'],2)
         self.assertEqual(path.read_bytes(),prior)
         self.assign(tile='sample_tile_0002',ident=1,key='fiber')
-        saved=json.loads(path.read_text())
+        self.assertEqual(path.read_bytes(), prior)
+        snapshot = self.root/'after_conversion.json'
+        export_label_snapshot(self.dataset, snapshot)
+        saved=json.loads(snapshot.read_text())
         self.assertEqual(saved['class_catalog_version'],2)
         self.assertEqual(saved['labels'][object_key('sample_tile_0001',1)]['Manual_Class_ID'],4)
         self.assertEqual(saved['labels'][object_key('sample_tile_0001',2)]['Manual_Class_ID'],2)
@@ -300,7 +315,7 @@ class ObjectLabelsTests(unittest.TestCase):
 
     def test_legacy_catalog_rejects_mismatched_key_id_and_object_version(self):
         report=self.assign(key='agglomeration')
-        path=Path(report['path'])
+        path=self.legacy_fixture()
         legacy=json.loads(path.read_text()); legacy['class_catalog_version']=1
         # The old agglomeration ID was 2, not the new 4.
         atomic_json(path,legacy)

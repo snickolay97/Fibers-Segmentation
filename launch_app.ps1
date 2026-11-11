@@ -1,13 +1,21 @@
 ﻿param([string]$ProjectFile = '', [switch]$SmokeTest, [switch]$Shortcut)
 $ErrorActionPreference = 'Stop'
 $taskRoot = $PSScriptRoot
-# Try the project environment first, then the local scientific environment and PATH.
+# Machine-specific interpreter paths belong to an ignored local configuration.
 # Probe imports because finding a Python executable alone does not verify native DLLs.
+$taskLocalPython = $null
+$taskRuntimeConfig = Join-Path $taskRoot 'local_runtime.json'
+if (Test-Path -LiteralPath $taskRuntimeConfig) {
+    try { $taskLocalPython = (Get-Content -LiteralPath $taskRuntimeConfig -Raw | ConvertFrom-Json).python_path }
+    catch { $taskLocalPython = $null }
+}
 $taskCandidates = @(
+    $env:SOLODATA_PYTHON,
     (Join-Path $taskRoot '.venv\Scripts\python.exe'),
-    (Join-Path $env:USERPROFILE 'anaconda3\envs\bm-336546\python.exe'),
+    $taskLocalPython,
+    $(if ($env:CONDA_PREFIX) { Join-Path $env:CONDA_PREFIX 'python.exe' }),
     'python'
-)
+) | Where-Object { $_ }
 $taskPython = $null
 foreach ($taskCandidate in $taskCandidates) {
     if ($taskCandidate -ne 'python' -and -not (Test-Path -LiteralPath $taskCandidate)) { continue }

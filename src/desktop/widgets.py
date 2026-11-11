@@ -1208,12 +1208,45 @@ class CsvTable(QtWidgets.QWidget):
             label = labels.get(self._object_key(row), {})
             row.update({name:label[name] for name in self.MANUAL_HEADERS if name in label})
             self.rows.append(row)
+        self._manual_rows_by_key = {self._object_key(row): row for row in self.rows}
         self._refresh_classes()
         self.apply_filter()
         if selected:
             self.select_object(selected.get('Tile_Name'), selected.get('Object_ID'))
 
     apply_manual_labels = set_manual_labels
+
+    def update_manual_label(self, key, label):
+        """Update one visible row; filtered views keep their existing semantics."""
+        row = getattr(self, '_manual_rows_by_key', {}).get(key)
+        if row is None:
+            return
+        row.update(Manual_Class_ID='', Manual_Class='', Reviewed=False)
+        row.update({name: label[name] for name in self.MANUAL_HEADERS if label and name in label})
+        if self.search.text().strip() or self.class_filter.currentData() is not None:
+            self.apply_filter()
+            return
+        position = getattr(self, '_visible_indexes_by_key', {}).get(key)
+        if position is None:
+            return
+        for column in range(len(self.headers)):
+            item = self.table.item(position, column)
+            if item is not None:
+                item.setData(QtCore.Qt.ItemDataRole.UserRole, row)
+        for name in self.MANUAL_HEADERS:
+            if name not in self.headers:
+                continue
+            item = self.table.item(position, self.headers.index(name))
+            if item is None:
+                continue
+            value = row.get(name, '')
+            if name == 'Manual_Class':
+                value = self._manual_name(value)
+                item.setForeground(QtGui.QColor('#20a585') if label else QtGui.QBrush())
+                font = item.font(); font.setBold(bool(label)); item.setFont(font)
+            elif name == 'Reviewed':
+                value = self._text('Yes') if label else ''
+            item.setText(str(value))
 
     def selected_row(self):
         selected = self.table.selectedItems()
@@ -1263,6 +1296,7 @@ class CsvTable(QtWidgets.QWidget):
             values += ' ' + self._manual_name(row.get('Manual_Class')) + ' ' + self._text(str(row.get('Class_Name', '')))
             return not query or query in values.casefold()
         self.visible_rows = [row for row in self.rows if matches(row)]
+        self._visible_indexes_by_key = {self._object_key(row): i for i, row in enumerate(self.visible_rows)}
         self.table.setSortingEnabled(False)
         self.table.clear()
         self.table.setColumnCount(len(self.headers))

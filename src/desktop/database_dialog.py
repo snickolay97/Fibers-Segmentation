@@ -83,6 +83,7 @@ class DatabaseDialog(QtWidgets.QDialog):
     def __init__(self, project, parent=None):
         super().__init__(parent)
         self.catalog = project.catalog()
+        self.project = project
         self._saved_settings = dict(project.settings)
         self._help_center = None
         self.offset = 0
@@ -155,6 +156,10 @@ class DatabaseDialog(QtWidgets.QDialog):
 
     def refresh(self):
         self.report = self.catalog.status()
+        if self.report['state'] == 'current':
+            # Label audit events are durable in their measurement database even
+            # before the next project JSON/catalog checkpoint.
+            self.report['counts']['history'] = len(self.project.history)
         state = self.report['state']
         text = tr('SQLite catalog: ' + state)
         if state == 'current':
@@ -185,7 +190,8 @@ class DatabaseDialog(QtWidgets.QDialog):
         rows = []
         if self.report['state'] == 'current':
             try:
-                rows = self.catalog.records(kind, offset=self.offset, limit=self.PAGE_SIZE)
+                rows = (self.project.history[self.offset:self.offset+self.PAGE_SIZE] if kind == 'history'
+                        else self.catalog.records(kind, offset=self.offset, limit=self.PAGE_SIZE))
             except (OSError, ValueError, sqlite3.Error) as error:
                 self.state.setText(tr('SQLite catalog: unavailable') + '\n' + tr(str(error)))
         self.table.setColumnCount(len(fields))

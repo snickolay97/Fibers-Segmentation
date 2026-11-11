@@ -1363,6 +1363,7 @@ class MainWindow(QtWidgets.QMainWindow):
         self.classifier.apply_class.connect(self.assign_manual_class)
         self.classifier.navigate.connect(self.navigate_objects)
         self.classifier.export_requested.connect(self.export_training_results)
+        self.classifier.snapshot_export_requested.connect(self.export_manual_label_snapshot)
         object_panel = QtWidgets.QWidget()
         object_panel.setMinimumWidth(305)
         object_layout = QtWidgets.QVBoxLayout(object_panel)
@@ -2582,16 +2583,25 @@ class MainWindow(QtWidgets.QMainWindow):
         if dataset is None or row is None or self.process is not None:
             return
         try:
-            report = self.service.assign_object_class(self.project, dataset["id"],
-                row["Tile_Name"], row["Object_ID"], class_key)
+            delta = self.service.assign_object_class(self.project, dataset["id"],
+                row["Tile_Name"], row["Object_ID"], class_key, compact=True)
+            report = self._manual_report
+            if report.get('measurement_reference') != delta['measurement_reference'] or 'labels' not in report:
+                report = self.service.get_object_labels(dataset)
+            labels = report['labels']
+            key, label = delta['object_key'], delta['label']
+            if label:
+                labels[key] = label
+            else:
+                labels.pop(key, None)
+            report.update({name: value for name, value in delta.items() if name not in ('label', 'audit_event')})
             self._manual_report = report
             previous = dict(row)
-            self.results_table.set_manual_labels(report)
-            self.object_gallery.set_manual_labels(report)
+            self.results_table.update_manual_label(key, label)
+            self.object_gallery.update_manual_label(key, label, report['assigned'])
             self.classifier.set_progress(report.get("assigned", 0), report.get("total", 0))
             selected = self.results_table.selected_row()
-            self.analytics.set_data(dataset, self.results_table.headers, self.results_table.rows, report,
-                                    project_datasets=self.project.datasets)
+            self.analytics.update_manual_label(report, key, label)
             self.classifier.set_object(selected)
             if selected is None:
                 self.object_view.clear(tr("Выберите объект в таблице для проверки маски"))
@@ -2610,6 +2620,26 @@ class MainWindow(QtWidgets.QMainWindow):
         except Exception as exc:
             self._error(exc)
             self.classifier.set_enabled_current(self.service.results_are_current(dataset))
+
+    def export_manual_label_snapshot(self):
+        dataset = self._require_dataset()
+        if not dataset or self.process is not None:
+            return
+        if not self.service.results_are_current(dataset):
+            self._error(tr('Пересчитайте признаки перед экспортом обучающей таблицы.'))
+            return
+        destination, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self, tr('Export label snapshot (JSON)…'),
+            str(Path(self.project.workspace)/'manual_object_labels.json'), 'JSON (*.json)')
+        if destination:
+            try:
+                from .object_labels import export_label_snapshot
+                if Path(destination).resolve() == Path(self.project.path).resolve():
+                    raise ValueError(tr('Export must not overwrite measurement data, object masks, or manual labels'))
+                export_label_snapshot(dataset, destination)
+                self._log(tr('Manual label snapshot saved: {path}', path=destination))
+            except Exception as error:
+                self._error(error)
 
     def navigate_objects(self, direction):
         target = self.object_gallery if self.review_tabs.currentIndex() == 0 else self.results_table

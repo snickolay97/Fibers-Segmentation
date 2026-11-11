@@ -100,6 +100,14 @@ class Project:
         if any(not isinstance(items, list) or any(not isinstance(item, dict) for item in items)
                for items in (project.sources, project.datasets)):
             raise ValueError(tr('The project source or dataset list is damaged.'))
+        from .label_database import recover_project_label_history
+        try:
+            recover_project_label_history(project)
+        except (OSError, ValueError, sqlite3.Error) as error:
+            # A damaged label authority blocks labeling/export, not opening the
+            # project to inspect its other measurements or restore a backup.
+            project._label_history_error = str(error)
+            logging.getLogger(__name__).warning('Label history recovery unavailable: %s', error)
         return project
 
     def save(self):

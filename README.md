@@ -1,19 +1,19 @@
 # SoLoData
 
-Previously named FiBreath. Existing projects, language preferences and panel layouts remain compatible. The repository keeps its existing name, Fibers-Segmentation.
+Previously named FiBreath. Existing projects and panel layouts remain compatible. The repository keeps its existing name, Fibers-Segmentation.
 
 [SoLoData release notes](docs/SOLODATA_RELEASE_2026-11-11_RU.md).
 
-A local Windows application for microscopy TIFF processing, tile review, YOLO segmentation import, feature extraction, and manual object classification for Random Forest datasets. English is the default interface language; Russian and Hebrew are available from the language selector. [Русская инструкция](README_RU.md).
+A local Windows application for microscopy TIFF processing, tile review, YOLO segmentation import, feature extraction, and manual object classification for Random Forest datasets. [Additional guide](README_RU.md).
 
 ## Start
 
-Double-click **launch_app.cmd**. On this computer, the launcher finds the installed scientific Python environment `bm-336546`. Qt uses PyQt6 or PySide6. Processing works offline. The app reopens the last successfully selected project. If that project cannot be opened, the default project opens with an explanation. An explicit `--project` takes precedence.
+Double-click **launch_app.cmd**. The launcher checks the configured interpreter, the project environment and PATH. Qt uses PyQt6 or PySide6. Processing works offline. The app reopens the last successfully selected project. If that project cannot be opened, the default project opens with an explanation. An explicit `--project` takes precedence.
 
 Alternatively, from the project directory:
 
 ```powershell
-& "$env:USERPROFILE\anaconda3\envs\bm-336546\python.exe" -B app.py
+& ".venv\Scripts\python.exe" -B app.py
 ```
 
 On another computer, install Python 3.10+ and create a local environment:
@@ -25,14 +25,6 @@ python -m venv .venv
 ```
 
 This release includes source code and a Windows launcher. An independent bundled EXE is not included.
-
-To choose Hebrew for one launch, append `--language he`, for example:
-
-```powershell
-& "$env:USERPROFILE\anaconda3\envs\bm-336546\python.exe" -B app.py --language he
-```
-
-The selector also supports English (`en`) and Russian (`ru`). Hebrew uses a right-to-left workspace; numeric controls, image coordinates, file identifiers and technical tables keep left-to-right reading. Language changes preserve scientific parameter keys, class IDs and CSV columns.
 
 ## Workflow
 
@@ -71,7 +63,7 @@ Folder examples: `sources/FL01_G3_RGB_Red.tif`, `runs/Preparation_001/tiles/FL01
 
 **Back up project metadata…** creates matching JSON/SQLite snapshots with a `METADATA_ONLY.txt` notice. For a complete backup, stop processing, close SoLoData and copy the **entire project folder** to another disk. Older absolute scientific paths may need relocation before a copied project can be used elsewhere. Work on a local disk; sharing a live SQLite file through a network drive or cloud synchronization is not supported collaboration.
 
-Developer diagnostics: `python tools/project_database.py --project <project.json> status`; `sync`, `rebuild`, `list datasets --status ready`, `list history --action assign_object_class`, and `backup <new-directory>` are also available. Maintenance commands use the desktop project lock. [Database research and implementation report, Russian](docs/DATABASE_RESEARCH_2026-11-11_RU.md).
+Developer diagnostics: `python tools/project_database.py --project <project.json> status`; `sync`, `rebuild`, `list datasets --status ready`, `list history --action assign_object_class`, and `backup <new-directory>` are also available. Maintenance commands use the desktop project lock. [Database research and implementation report](docs/DATABASE_RESEARCH_2026-11-11_RU.md).
 
 **Help** opens a searchable application guide and the pipeline parameter reference. **F1** opens help for the focused parameter or current page. Use the clickable **?** badges or a field’s **Explain this parameter** context action for the same article.
 
@@ -83,7 +75,7 @@ Use **Help → Restore saved settings** to return the form to the last successfu
 
 **Settings…** in the top bar collects all processing options and the starting values for both editors. Search by name or key, compare with factory values and save the project draft. A separate checkbox remembers processing settings for new projects. The editor tabs apply their values when an editor opens.
 
-Invalid edits are highlighted in red and explained with the allowed range and factory value. They cannot be saved or used to start processing; closing the window or changing language keeps the valid saved settings. If an older project already contains invalid settings, startup first backs up its exact original bytes in a unique `.recovery` subfolder, then repairs only the invalid fields. Valid choices and project data are preserved, and changes are recorded in history; unsupported settings are retained in the backup and recorded when removed.
+Invalid edits are highlighted in red and explained with the allowed range and factory value. They cannot be saved or used to start processing; closing the window keeps the valid saved settings. If an older project already contains invalid settings, startup first backs up its exact original bytes in a unique `.recovery` subfolder, then repairs only the invalid fields. Valid choices and project data are preserved, and changes are recorded in history; unsupported settings are retained in the backup and recorded when removed.
 
 ## Filters and workspace
 
@@ -148,7 +140,7 @@ The **Object gallery** displays real verification crops saved during feature ext
 
 Under **More class controls**, the class selector and **Save class / Save and next** remain available. Choosing **Unclassified** and saving removes a previous target. Keyboard shortcuts **1–6** correspond to the class IDs **0–5** below; stored IDs remain zero-based.
 
-| Stable ID | CSV target key | English class |
+| Stable ID | CSV target key | Class |
 |---|---|---|
 | 0 | particle | Particle |
 | 1 | fiber | Fiber |
@@ -157,9 +149,11 @@ Under **More class controls**, the class selector and **Save class / Save and ne
 | 4 | agglomeration | Agglomeration |
 | 5 | adhered_objects | Adhered objects |
 
-Manual targets are saved in `manual_object_labels.json` beside the selected measurement version. They are identified by dataset, measurement, tile, and object. Scientific values and original YOLO classes stay intact. A new extraction creates a new object version and starts without manual targets; previous labels remain in the previous results directory. Annotation/tile changes require recalculation before assignment or training export.
+Manual targets are saved in `manual_object_labels.sqlite3` beside the selected measurement version. Each assignment updates one target and its audit event in one transaction, without rewriting the feature CSV or project JSON. Old `manual_object_labels.json` files are validated and imported on first save; their original bytes are preserved. Targets remain bound to the dataset, measurement, tile, object and CSV digest. A new extraction starts without previous targets; mask corrections retain targets only for unchanged objects, and undo restores the parent version.
 
-**Export training CSV** exports assigned objects by default, with numeric scientific features, `Manual_Class_ID`, `Manual_Class`, `Reviewed`, and source/measurement references. CSV target keys and IDs remain the same across all interface languages.
+**More class controls → Export label snapshot (JSON)…** writes the latest targets for compatible older readers on a separate project copy. Keep the target database, `manual_object_labels_storage.json` and original JSON in full project backups. A missing/damaged target database must be restored from backup; the old JSON is not silently reused. The separate `project.sqlite3` catalog remains rebuildable metadata.
+
+**Export training CSV** exports assigned objects by default, with numeric scientific features, `Manual_Class_ID`, `Manual_Class`, `Reviewed`, and source/measurement references. CSV target keys and IDs remain stable.
 
 The numerical predictors are `Area`, `Aspect_Ratio`, `Solidity`, `Euler_Number`, `Endpoints`, and `Branch_Points`. `Area_um2` is included when calibrated. `Manual_Class_ID` is the training target. Original YOLO `Class_ID`/`Class_Name`, source identifiers, and measurement references remain in the CSV as metadata and are excluded from the predictor list.
 
@@ -195,13 +189,13 @@ Use **Brush (B)** and **Eraser (E)** for freehand corrections. **Pan (H)**, whee
 
 **Save connected mask** requires one nonempty 8-connected component. It publishes a new Measurement version, recalculates all six predictors and calibrated area, and requires review of the new object’s manual class. Otsu does not split the accepted mask again in that version. Paths, widths, input hashes and manual additions are recorded; additions remain pink in Objects after reopening and later unions. Native/model intensities and YOLO files stay unchanged. Grayscale crops preserve actual intensities, so a binary bridge can look dark there. The bridge is a manual reconstruction, not observed biological evidence.
 
-**Delete selected masks** removes selected noise objects from the current CSV, masks, crops, labels, charts and training export. **Undo last mask change** restores the complete parent, even after deleting every object. Other IDs and labels remain intact. Original versions stay on disk. A full new measurement starts segmentation afresh: removed noise can return and manual bridges are not blindly transferred to changed inputs. Ordinary **Merge selected parts** still groups exact masks with their gaps. **? / F1** explains controls, factory values, limits and recovery in English, Russian and Hebrew.
+**Delete selected masks** removes selected noise objects from the current CSV, masks, crops, labels, charts and training export. **Undo last mask change** restores the complete parent, even after deleting every object. Other IDs and labels remain intact. Original versions stay on disk. A full new measurement starts segmentation afresh: removed noise can return and manual bridges are not blindly transferred to changed inputs. Ordinary **Merge selected parts** still groups exact masks with their gaps. **? / F1** explains controls, factory values, limits and recovery.
 
 ## Verification
 
 ```powershell
 $env:QT_QPA_PLATFORM='offscreen'
-& "$env:USERPROFILE\anaconda3\envs\bm-336546\python.exe" -B -m unittest discover -s test -p 'test_*.py' -v
+& ".venv\Scripts\python.exe" -B -m unittest discover -s test -p 'test_*.py' -v
 & .\launch_app.ps1 -SmokeTest
 ```
 

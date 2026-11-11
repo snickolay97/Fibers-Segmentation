@@ -117,7 +117,7 @@ class ActiveTileEditTests(unittest.TestCase):
         groups = {self.dataset['id']: 'experiment'}
         self.assertEqual(len(assemble_snapshot(self.project, [self.dataset['id']], groups, 'Area')['rows']), 1)
         old_csv = Path(self.dataset['last_csv'])
-        old_labels = Path(self.dataset['results_dir']) / 'manual_object_labels.json'
+        old_labels = Path(service.get_object_labels(self.dataset)['path'])
         labels_bytes = old_labels.read_bytes()
         self.save_cut()
         self.assertFalse(service.results_are_current(self.dataset))

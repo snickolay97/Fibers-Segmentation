@@ -333,6 +333,23 @@ class ObjectReviewGallery(QtWidgets.QWidget):
         self._labels_supplied = True
         self.apply_filter()
 
+    def update_manual_label(self, key, label, assigned):
+        """Retain thumbnails and repaint the changed card without a model reset."""
+        if label:
+            self._labels[key] = dict(label)
+        else:
+            self._labels.pop(key, None)
+        self._labels_supplied = True
+        if self.unclassified_only.isChecked() or self.search.text().strip():
+            self.apply_filter()
+            return
+        position = self._visible_indexes.get(key)
+        if position is not None:
+            index = self._model.index(position, 0)
+            self._model.dataChanged.emit(index, index, [])
+        self.summary.setText(self._text('{visible} / {total} objects · {assigned} classified',
+            visible=len(self.visible_rows), total=len(self.rows), assigned=assigned))
+
     def filter_state(self):
         return dict(tile=self.tile_filter.currentData(), search=self.search.text(),
                     unclassified=self.unclassified_only.isChecked())

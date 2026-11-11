@@ -23,7 +23,8 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertTrue(rows)
         service.assign_object_class(self.project,self.dataset['id'],rows[0]['Tile_Name'],int(rows[0]['Object_ID']),'fiber')
         self.csv_bytes=Path(self.dataset['last_csv']).read_bytes()
-        self.labels_bytes=(Path(self.dataset['results_dir'])/'manual_object_labels.json').read_bytes()
+        self.labels_path = Path(service.get_object_labels(self.dataset)['path'])
+        self.labels_bytes=self.labels_path.read_bytes()
         # Build the exact old UUID-wrapper layout from a real, valid dataset.
         source=self.project.sources[0]
         old_source=Path(source['path'])
@@ -63,7 +64,7 @@ class StorageMigrationTests(unittest.TestCase):
         self.assertEqual(Path(self.project.sources[0]['path']).parent,self.root/'sources')
         self.assertTrue(service.results_are_current(self.dataset))
         self.assertEqual(Path(self.dataset['last_csv']).read_bytes(),self.csv_bytes)
-        self.assertEqual((Path(self.dataset['results_dir'])/'manual_object_labels.json').read_bytes(),self.labels_bytes)
+        self.assertEqual(Path(service.get_object_labels(self.dataset)['path']).read_bytes(),self.labels_bytes)
         self.assertEqual(service.get_object_labels(self.dataset)['assigned'],1)
         self.assertIn('Preparation_001',self.dataset['path'])
         self.assertNotIn(self.project.sources[0]['id'][:12],self.dataset['path'])

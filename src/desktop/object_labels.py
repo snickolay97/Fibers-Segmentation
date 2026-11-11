@@ -6,14 +6,19 @@ Calibrated measurements also include Area_um2.
 """
 import csv
 import hashlib
+import io
 import json
 import math
 import os
 from pathlib import Path
 import tempfile
+import sqlite3
 
 from .project import atomic_json, timestamp
 from .i18n import tr
+from . import label_storage_text
+from .file_revision import file_revision
+from .label_database import LabelDatabase, DATABASE_FILENAME, STORAGE_FILENAME
 from src.object_classes import OBJECT_CLASS_CATALOG, CLASS_CATALOG_VERSION
 
 
@@ -28,6 +33,7 @@ TRACEABILITY_COLUMNS = ('Large_Image', 'Tile_Name', 'Object_ID', 'Class_ID', 'Cl
 MANUAL_COLUMNS = ('Manual_Class_ID', 'Manual_Class', 'Reviewed', 'Dataset_ID',
                   'Measurement_Reference', 'Class_Catalog_Version')
 LABELS_FILENAME = 'manual_object_labels.json'
+_MEASUREMENT_CACHE = {}
 
 
 def object_key(tile_name, object_id):
@@ -45,7 +51,7 @@ def object_key(tile_name, object_id):
     return '{}/{}'.format(tile_name, ident)
 
 
-def _measurement(dataset):
+def _measurement(dataset, *, fresh=False):
     """Index an immutable feature table and bind labels to its byte digest."""
     dataset_id, signature = dataset.get('id'), dataset.get('measurement_signature')
     if not isinstance(dataset_id, str) or not dataset_id or not isinstance(signature, str) or not signature:
@@ -54,7 +60,13 @@ def _measurement(dataset):
     source = Path(dataset.get('last_csv') or '').resolve()
     if not output.is_dir() or not source.is_file() or source.parent != output:
         raise ValueError(tr('Measurement CSV is missing or outside its measurement directory'))
-    with source.open(encoding='utf-8-sig', newline='') as handle:
+    revision = file_revision(source)
+    cache_key = (str(source), dataset_id, signature, revision)
+    cached = _MEASUREMENT_CACHE.get(cache_key) if revision[-1] is not None else None
+    if not fresh and cached is not None:
+        return cached
+    raw_csv = source.read_bytes()
+    with io.StringIO(raw_csv.decode('utf-8-sig'), newline='') as handle:
         reader = csv.DictReader(handle)
         fields = list(reader.fieldnames or [])
         if not {'Tile_Name', 'Object_ID'}.issubset(fields) or len(set(fields)) != len(fields):
@@ -71,15 +83,28 @@ def _measurement(dataset):
     reference = dataset_id + ':' + signature
     identity = dict(dataset_id=dataset_id, measurement_signature=signature,
                     measurement_reference=reference,
-                    csv_sha256=hashlib.sha256(source.read_bytes()).hexdigest())
-    return output, source, fields, rows, indexed, identity
+                    csv_sha256=hashlib.sha256(raw_csv).hexdigest())
+    if file_revision(source) != revision:
+        raise ValueError(tr('Measurement CSV changed while being read. Reload measurements.'))
+    # Keep one immutable measurement snapshot, not an unbounded project cache.
+    # Callers must not mutate its scientific rows or identity.
+    result = output, source, fields, rows, indexed, identity
+    _MEASUREMENT_CACHE.clear()
+    _MEASUREMENT_CACHE[cache_key] = result
+    return result
 
 
-def _load_document(output, indexed, identity):
+def _load_legacy_document(output, indexed, identity):
     path = output/LABELS_FILENAME
     if not path.exists():
         return dict(schema_version=1, class_catalog_version=CLASS_CATALOG_VERSION, **identity, labels={})
+    if path.is_symlink():
+        raise ValueError(tr('Manual label output must not be a symlink'))
     document = json.loads(path.read_text(encoding='utf-8'))
+    return _validate_document(document, indexed, identity)
+
+
+def _validate_document(document, indexed, identity):
     if not isinstance(document, dict) or type(document.get('schema_version')) is not int or document.get('schema_version') != 1:
         raise ValueError(tr('Unsupported manual object labels format'))
     catalog_version = document.get('class_catalog_version')
@@ -111,6 +136,16 @@ def _load_document(output, indexed, identity):
     return document
 
 
+def _load_document(output, indexed, identity):
+    store = LabelDatabase(output)
+    try:
+        if store.present:
+            return _validate_document(store.document(identity), indexed, identity)
+        return _load_legacy_document(output, indexed, identity)
+    except sqlite3.Error as error:
+        raise ValueError(tr('The manual-label database cannot be read. Restore it from a full project backup.')) from error
+
+
 def _report(output, indexed, document, current):
     labels = document['labels']
     counts = {key: 0 for key in CLASS_BY_KEY}
@@ -121,7 +156,8 @@ def _report(output, indexed, document, current):
                 total=len(indexed), unassigned=len(indexed)-len(labels), class_counts=counts,
                 class_catalog_version=CLASS_CATALOG_VERSION,
                 measurement_reference=document['measurement_reference'],
-                path=str(output/LABELS_FILENAME), current=bool(current))
+                path=str(output/(DATABASE_FILENAME if LabelDatabase(output).present else LABELS_FILENAME)),
+                storage='sqlite' if LabelDatabase(output).present else 'json', current=bool(current))
 
 
 def load_object_labels(dataset, current=True):
@@ -135,32 +171,60 @@ def load_object_labels(dataset, current=True):
     return _report(output, indexed, document, current)
 
 
-def save_object_class(dataset, tile_name, object_id, class_key):
+def _save_object_class(dataset, tile_name, object_id, class_key, *, compact=False):
     """Persist one assignment atomically, using None to clear the target."""
     if class_key is not None and (not isinstance(class_key,str) or class_key not in CLASS_BY_KEY):
         raise ValueError(tr('Unknown manual object class'))
+    csv_path = Path(dataset.get('last_csv') or '').resolve()
+    if not csv_path.is_file():
+        raise ValueError(tr('Measurement CSV is missing or outside its measurement directory'))
+    revision = file_revision(csv_path)
     output, source, fields, rows, indexed, identity = _measurement(dataset)
+    # Bind the transaction check to the snapshot, not a later file revision.
+    if file_revision(source) != revision:
+        raise ValueError(tr('Measurement CSV changed while being read. Reload measurements.'))
     key = object_key(tile_name, object_id)
     if key not in indexed:
         raise ValueError(tr('The selected object does not exist in this measurement version'))
-    document = _load_document(output, indexed, identity)
-    previous = document['labels'].get(key)
-    if class_key is None:
-        document['labels'].pop(key, None)
-    else:
+    store = LabelDatabase(output)
+    if not store.present:
+        legacy = output/LABELS_FILENAME
+        legacy_revision = file_revision(legacy) if legacy.exists() else None
+        document = _load_legacy_document(output, indexed, identity)
+        store.initialize(document, indexed, legacy_revision=legacy_revision)
+    label = None
+    if class_key is not None:
         definition = CLASS_BY_KEY[class_key]
-        document['labels'][key] = dict(Tile_Name=tile_name, Object_ID=int(object_id),
+        label = dict(Tile_Name=tile_name, Object_ID=int(object_id),
             Manual_Class_ID=definition['id'], Manual_Class=class_key, Reviewed=True,
             updated_at=timestamp())
-    document.update(updated_at=timestamp(), assigned_count=len(document['labels']), object_count=len(indexed))
-    path = output/LABELS_FILENAME
-    if path.is_symlink():
-        raise ValueError(tr('Manual label output must not be a symlink'))
-    atomic_json(path, document)
-    report = _report(output, indexed, document, True)
-    report.update(object_key=key, previous_class=previous.get('Manual_Class') if previous else None,
-                  manual_class=class_key)
+    delta = store.assign(identity, key, label, csv_path=source, csv_revision=revision)
+    if compact:
+        report = dict(class_catalog_version=CLASS_CATALOG_VERSION,
+                      measurement_reference=identity['measurement_reference'],
+                      path=str(store.path), storage='sqlite', current=True,
+                      unassigned=delta['total']-delta['assigned'])
+    else:
+        report = _report(output, indexed, _load_document(output, indexed, identity), True)
+    report.update(delta)
     return report
+
+
+def save_object_class(dataset, tile_name, object_id, class_key, *, compact=False):
+    """Keep storage failures distinct from the rebuildable catalog's errors."""
+    try:
+        return _save_object_class(dataset, tile_name, object_id, class_key, compact=compact)
+    except sqlite3.Error as error:
+        raise ValueError(tr('Manual label database operation failed: {error}', error=str(error))) from error
+
+
+def export_label_snapshot(dataset, destination):
+    """Explicit JSON interchange for older readers; never replace live authority."""
+    output, source, fields, rows, indexed, identity = _measurement(dataset, fresh=True)
+    document = _load_document(output, indexed, identity)
+    target = validate_export_destination(dataset, destination)
+    atomic_json(target, document)
+    return dict(path=str(target), assigned=len(document['labels']), measurement_reference=identity['measurement_reference'])
 
 
 def validate_export_destination(dataset, destination, allow_current_source=False):
@@ -180,11 +244,16 @@ def validate_export_destination(dataset, destination, allow_current_source=False
     if target == source and allow_current_source:
         return target
     version_root = output.parent
-    protected = target == source
+    protected = target == source or target.name.casefold() in {
+        'project.json', 'project.sqlite3', 'local_runtime.json', DATABASE_FILENAME.casefold(),
+        STORAGE_FILENAME.casefold(), *(DATABASE_FILENAME+suffix for suffix in ('-journal','-wal','-shm'))}
     if version_root in target.parents:
         relative = target.relative_to(version_root)
-        protected |= target.name in (source.name, LABELS_FILENAME, 'measurement_run.json')
-        protected |= 'verification_masks' in relative.parts
+        reserved = (source.name, LABELS_FILENAME, DATABASE_FILENAME, STORAGE_FILENAME,
+                    DATABASE_FILENAME+'-journal', DATABASE_FILENAME+'-wal',
+                    DATABASE_FILENAME+'-shm', 'measurement_run.json')
+        protected |= target.name.casefold() in {name.casefold() for name in reserved}
+        protected |= 'verification_masks' in {part.casefold() for part in relative.parts}
     if protected:
         raise ValueError(tr('Export must not overwrite measurement data, object masks, or manual labels'))
     return target
@@ -192,7 +261,7 @@ def validate_export_destination(dataset, destination, allow_current_source=False
 
 def write_training_csv(dataset, destination, only_labeled=True):
     """Export reviewed targets and numeric features with their source references."""
-    output, source, fields, rows, indexed, identity = _measurement(dataset)
+    output, source, fields, rows, indexed, identity = _measurement(dataset, fresh=True)
     document = _load_document(output, indexed, identity)
     target = validate_export_destination(dataset, destination)
     missing = [name for name in RF_PREDICTORS if name not in fields]

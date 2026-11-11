@@ -222,16 +222,16 @@ def get_object_labels(dataset, *, current=None):
     return load_object_labels(dataset, current=current)
 
 
-def assign_object_class(project, dataset_id, tile_name, object_id, class_key):
+def assign_object_class(project, dataset_id, tile_name, object_id, class_key, *, compact=False):
     from src.desktop.object_labels import save_object_class
     dataset = project.get_dataset(dataset_id)
     if not results_are_current(dataset):
         raise ValueError(tr('Пересчитайте признаки: разметка или состав тайлов изменились.'))
-    report = save_object_class(dataset, tile_name, object_id, class_key)
-    project.add_history('assign_object_class', dataset_id=dataset_id,
-                       measurement_reference=report['measurement_reference'],
-                       tile_name=tile_name, object_id=int(object_id), class_key=class_key,
-                       previous_class=report['previous_class'], assigned=report['assigned'])
+    report = save_object_class(dataset, tile_name, object_id, class_key, compact=compact)
+    # The durable event is committed with the target. JSON is only a later
+    # checkpoint, so a click never rewrites the growing project history.
+    if report.get('audit_event'):
+        project.history.append(report['audit_event'])
     return report
 
 

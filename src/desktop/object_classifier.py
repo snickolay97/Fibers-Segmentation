@@ -22,6 +22,7 @@ class ObjectClassifier(QtWidgets.QWidget):
     apply_class = Signal(object, bool)
     navigate = Signal(str)
     export_requested = Signal()
+    snapshot_export_requested = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -120,6 +121,10 @@ class ObjectClassifier(QtWidgets.QWidget):
         save.addWidget(self.save_button)
         save.addWidget(self.save_next_button, 1)
         advanced_layout.addLayout(save)
+        self.snapshot_export_button = QtWidgets.QPushButton(self._text('Export label snapshot (JSON)…'))
+        self.snapshot_export_button.clicked.connect(lambda _checked=False: self.snapshot_export_requested.emit())
+        attach_help(self.snapshot_export_button, 'manual_export')
+        advanced_layout.addWidget(self.snapshot_export_button)
         self.advanced_controls.hide()
         navigation = QtWidgets.QHBoxLayout()
         navigation.addWidget(self.previous_button)
@@ -211,6 +216,7 @@ class ObjectClassifier(QtWidgets.QWidget):
             button.setToolTip(self._text(text))
             button.setAccessibleName(self._text(text))
         self.export_button.setText(self._text('Export training CSV'))
+        self.snapshot_export_button.setText(self._text('Export label snapshot (JSON)…'))
         self.set_progress(self._assigned, self._total)
         self._update_state()
 
@@ -253,6 +259,7 @@ class ObjectClassifier(QtWidgets.QWidget):
         for button in (self.previous_button, self.next_button, self.unlabeled_button):
             button.setEnabled(self._current and self._total > 0)
         self.export_button.setEnabled(self._current and self._assigned > 0)
+        self.snapshot_export_button.setEnabled(self._current)
         if self._row is None:
             self.object_label.setText(self._text('Select an object from the results table'))
         else:

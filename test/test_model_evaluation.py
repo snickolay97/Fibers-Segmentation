@@ -157,7 +157,7 @@ class ModelEvaluationTests(unittest.TestCase):
             path.touch()
         atomic_json(verification / 'object_locations.json', dict(schema_version=1, objects=[
             dict(tile_name='tile', object_id=2, mask=mask.relative_to(verification).as_posix())]))
-        labels_path = output / 'manual_object_labels.json'
+        labels_path = Path(service.get_object_labels(dataset)['path'])
         labels = labels_path.read_bytes()
         request = dict(action='object_prediction', evaluation_path=str(evaluation_path),
                        model_key='forest', dataset_id=inference_id, tile_names=['tile', 'empty'])
